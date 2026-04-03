@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: crypto-gpt-aggregator
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.gateway.api:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: GATEWAY_API_TOKEN
+        generateValue: true
+      - key: GATEWAY_PUBLIC_BASE_URL
+        sync: false
+      - key: GATEWAY_USER_AGENT
+        value: crypto-gpt-aggregator/0.1 you@example.com
+      - key: FRED_API_KEY
+        sync: false
+      - key: BLS_API_KEY
+        sync: false
+      - key: BEA_API_KEY
+        sync: false
+      - key: COINGECKO_DEMO_API_KEY
+        sync: false
+      - key: COINGECKO_PRO_API_KEY
+        sync: false

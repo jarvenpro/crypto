@@ -1,0 +1,40 @@
+{
+  "quota": {
+    "binance_spot": {
+      "day": "2026-04-02",
+      "day_count": 58,
+      "minute": "2026-04-02T06:21",
+      "minute_count": 5
+    },
+    "binance_futures": {
+      "day": "2026-04-02",
+      "day_count": 110,
+      "minute": "2026-04-02T06:21",
+      "minute_count": 5
+    },
+    "cryptocompare_news": {
+      "day": "2026-04-02",
+      "day_count": 16,
+      "minute": "2026-04-02T06:21",
+      "minute_count": 1
+    },
+    "gemini": {
+      "day": "2026-04-02",
+      "day_count": 15,
+      "minute": "2026-04-02T06:21",
+      "minute_count": 1
+    },
+    "telegram": {
+      "day": "2026-04-02",
+      "day_count": 4,
+      "minute": "2026-04-02T06:04",
+      "minute_count": 1
+    },
+    "binance_liquidation": {
+      "day": "2026-04-02",
+      "day_count": 11,
+      "minute": "2026-04-02T06:21",
+      "minute_count": 1
+    }
+  }
+}

@@ -1,0 +1,985 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Crypto GPT Aggregator API",
+    "description": "A minimal aggregation layer for Custom GPT Actions. It wraps selected free or free-tier crypto, macro, regulatory, and on-chain data sources behind a smaller set of GPT-friendly endpoints.\n\nAuthentication: configure Custom GPT Actions to send `X-API-Key: <your token>`.\nA Bearer token in the `Authorization` header is also accepted for manual testing.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Check service health and configured source availability",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/crypto/overview": {
+      "get": {
+        "tags": [
+          "Overview"
+        ],
+        "summary": "Get a compact crypto market overview for GPT",
+        "operationId": "crypto_overview_v1_crypto_overview_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Binance symbol such as BTCUSDT.",
+              "default": "BTCUSDT",
+              "title": "Symbol"
+            },
+            "description": "Binance symbol such as BTCUSDT."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Crypto Overview V1 Crypto Overview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/macro/overview": {
+      "get": {
+        "tags": [
+          "Overview"
+        ],
+        "summary": "Get a compact macro overview for GPT",
+        "operationId": "macro_overview_v1_macro_overview_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fred_series",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated FRED series IDs. Ignored if FRED_API_KEY is not configured.",
+              "default": "FEDFUNDS,DGS10,UNRATE",
+              "title": "Fred Series"
+            },
+            "description": "Comma-separated FRED series IDs. Ignored if FRED_API_KEY is not configured."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Macro Overview V1 Macro Overview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/regulatory/overview": {
+      "get": {
+        "tags": [
+          "Overview"
+        ],
+        "summary": "Get a compact regulatory overview for GPT",
+        "operationId": "regulatory_overview_v1_regulatory_overview_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entities",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated SEC tickers or CIKs for recent filing snapshots.",
+              "default": "IBIT,FBTC,GBTC",
+              "title": "Entities"
+            },
+            "description": "Comma-separated SEC tickers or CIKs for recent filing snapshots."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Regulatory Overview V1 Regulatory Overview Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/binance/market": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get Binance spot and futures snapshot",
+        "operationId": "binance_market_v1_sources_binance_market_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Binance symbol such as BTCUSDT.",
+              "default": "BTCUSDT",
+              "title": "Symbol"
+            },
+            "description": "Binance symbol such as BTCUSDT."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Binance Market V1 Sources Binance Market Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/coingecko/simple-price": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get CoinGecko simple price data",
+        "operationId": "coingecko_simple_price_v1_sources_coingecko_simple_price_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "CoinGecko asset ID, for example bitcoin.",
+              "default": "bitcoin",
+              "title": "Asset Id"
+            },
+            "description": "CoinGecko asset ID, for example bitcoin."
+          },
+          {
+            "name": "vs_currency",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Quote currency such as usd.",
+              "default": "usd",
+              "title": "Vs Currency"
+            },
+            "description": "Quote currency such as usd."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Coingecko Simple Price V1 Sources Coingecko Simple Price Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/fear-greed/latest": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get latest Fear & Greed index",
+        "operationId": "fear_greed_latest_v1_sources_fear_greed_latest_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Fear Greed Latest V1 Sources Fear Greed Latest Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/sources/mempool/fees": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get mempool.space recommended BTC fees",
+        "operationId": "mempool_fees_v1_sources_mempool_fees_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Mempool Fees V1 Sources Mempool Fees Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/sources/treasury/latest-avg-rates": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get latest Treasury average interest rate snapshot",
+        "operationId": "treasury_latest_avg_rates_v1_sources_treasury_latest_avg_rates_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Treasury Latest Avg Rates V1 Sources Treasury Latest Avg Rates Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/sources/bls/series/{series_id}": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get latest BLS time series observations",
+        "operationId": "bls_series_v1_sources_bls_series__series_id__get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "series_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Series Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 24,
+              "minimum": 1,
+              "description": "Maximum number of observations to return.",
+              "default": 12,
+              "title": "Limit"
+            },
+            "description": "Maximum number of observations to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Bls Series V1 Sources Bls Series  Series Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/fred/series/{series_id}": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get latest FRED observations",
+        "operationId": "fred_series_v1_sources_fred_series__series_id__get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "series_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Series Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 24,
+              "minimum": 1,
+              "description": "Maximum number of observations to return.",
+              "default": 12,
+              "title": "Limit"
+            },
+            "description": "Maximum number of observations to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Fred Series V1 Sources Fred Series  Series Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/bea/datasets": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "List BEA datasets",
+        "operationId": "bea_datasets_v1_sources_bea_datasets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Bea Datasets V1 Sources Bea Datasets Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ]
+      }
+    },
+    "/v1/sources/bea/gdp": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get BEA GDP observations",
+        "operationId": "bea_gdp_v1_sources_bea_gdp_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "year",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "BEA year selector such as LAST5, 2024, or ALL.",
+              "default": "LAST5",
+              "title": "Year"
+            },
+            "description": "BEA year selector such as LAST5, 2024, or ALL."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Bea Gdp V1 Sources Bea Gdp Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/fed/monetary-feed": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get latest Federal Reserve monetary RSS items",
+        "operationId": "fed_monetary_feed_v1_sources_fed_monetary_feed_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10,
+              "minimum": 1,
+              "description": "Number of RSS items to return.",
+              "default": 5,
+              "title": "Limit"
+            },
+            "description": "Number of RSS items to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Fed Monetary Feed V1 Sources Fed Monetary Feed Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/sec/company-tickers": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Search SEC company ticker directory",
+        "operationId": "sec_company_tickers_v1_sources_sec_company_tickers_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Ticker or name fragment such as IBIT or BlackRock.",
+              "title": "Query"
+            },
+            "description": "Ticker or name fragment such as IBIT or BlackRock."
+          },
+          {
+            "name": "exchange",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional exchange filter such as Nasdaq or NYSE.",
+              "title": "Exchange"
+            },
+            "description": "Optional exchange filter such as Nasdaq or NYSE."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Maximum number of rows to return.",
+              "default": 25,
+              "title": "Limit"
+            },
+            "description": "Maximum number of rows to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Sec Company Tickers V1 Sources Sec Company Tickers Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/sec/submissions/{entity}": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get SEC submissions by ticker or CIK",
+        "operationId": "sec_submissions_v1_sources_sec_submissions__entity__get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "entity",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entity"
+            }
+          },
+          {
+            "name": "forms_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 20,
+              "minimum": 1,
+              "description": "Maximum number of recent filings to return.",
+              "default": 10,
+              "title": "Forms Limit"
+            },
+            "description": "Maximum number of recent filings to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Sec Submissions V1 Sources Sec Submissions  Entity  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/sources/cftc/bitcoin-cot": {
+      "get": {
+        "tags": [
+          "Sources"
+        ],
+        "summary": "Get latest CFTC bitcoin commitment of traders data",
+        "operationId": "cftc_bitcoin_cot_v1_sources_cftc_bitcoin_cot_get",
+        "security": [
+          {
+            "GatewayApiKey": []
+          },
+          {
+            "GatewayBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "exchange",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "Exchange filter. Use cme or all.",
+              "default": "cme",
+              "title": "Exchange"
+            },
+            "description": "Exchange filter. Use cme or all."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10,
+              "minimum": 1,
+              "description": "Maximum number of records to return.",
+              "default": 4,
+              "title": "Limit"
+            },
+            "description": "Maximum number of records to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Cftc Bitcoin Cot V1 Sources Cftc Bitcoin Cot Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "GatewayApiKey": {
+        "type": "apiKey",
+        "description": "Set this to your GATEWAY_API_TOKEN value.",
+        "in": "header",
+        "name": "X-API-Key"
+      },
+      "GatewayBearer": {
+        "type": "http",
+        "description": "Optional alternative to X-API-Key. Use Bearer <GATEWAY_API_TOKEN>.",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "https://your-public-domain.example.com",
+      "description": "Public HTTPS base URL used by Custom GPT Actions."
+    }
+  ]
+}
