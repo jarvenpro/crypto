@@ -47,8 +47,8 @@ def pparam(name: str, description: str, schema_type: str = "string") -> dict:
     }
 
 
-def op(summary: str, description: str, operation_id: str, parameters: list[dict] | None = None) -> dict:
-    return {
+def op(summary: str, description: str, operation_id: str, parameters: list[dict] | None = None, auth_enabled: bool = True) -> dict:
+    operation = {
         "operationId": operation_id,
         "summary": summary,
         "description": description,
@@ -63,13 +63,15 @@ def op(summary: str, description: str, operation_id: str, parameters: list[dict]
                 },
             }
         },
-        "security": [{"bearerAuth": []}],
     }
+    if auth_enabled:
+        operation["security"] = [{"bearerAuth": []}]
+    return operation
 
 
-def build_schema(base_url: str) -> dict:
+def build_schema(base_url: str, auth_enabled: bool) -> dict:
     base_url = base_url.rstrip("/")
-    return {
+    schema = {
         "openapi": "3.1.0",
         "info": {
             "title": "Crypto GPT Aggregator API",
@@ -77,7 +79,7 @@ def build_schema(base_url: str) -> dict:
             "description": (
                 "Expanded Custom GPT action schema for real-time crypto, macro, regulatory, and market structure data. "
                 "Use overview endpoints for synthesis and source endpoints for targeted checks. "
-                "Authenticate with Bearer token in GPT action settings."
+                + ("Authenticate with Bearer token in GPT action settings." if auth_enabled else "No API token is currently required.")
             ),
         },
         "servers": [
@@ -95,6 +97,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("symbol", "Trading symbol, usually BTCUSDT.", default="BTCUSDT"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/macro/overview": {
@@ -105,6 +108,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("fred_series", "Comma-separated FRED series IDs.", default="FEDFUNDS,DGS10,UNRATE"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/regulatory/overview": {
@@ -115,6 +119,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("entities", "Comma-separated SEC tickers or CIKs.", default="IBIT,FBTC,GBTC"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/binance/market": {
@@ -125,6 +130,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("symbol", "Trading symbol, usually BTCUSDT.", default="BTCUSDT"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/binance/derivatives-structure": {
@@ -137,16 +143,18 @@ def build_schema(base_url: str) -> dict:
                         qparam("period", "History period such as 15m, 30m, 1h, 2h, 4h, or 6h.", default="1h"),
                         qparam("limit", "Number of historical points to return.", default=12, schema_type="integer", minimum=3, maximum=30),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/binance/multi-timeframe-structure": {
                 "get": op(
                     "Get Binance multi-timeframe structure",
-                    "Returns Binance multi-timeframe structure for 15m, 1h, 4h, and 8h, including derived range levels, ATR-like volatility context, VWAP approximation, and raw candles for GPT to estimate 4h or 8h high-low zones.",
+                    "Returns Binance structure for 15m, 1h, 4h, 8h, 1d, 1w, and 1M, including range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles for 8h execution and higher-timeframe filtering.",
                     "getBinanceMultiTimeframeStructure",
                     [
                         qparam("symbol", "Trading symbol such as BTCUSDT.", default="BTCUSDT"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/bybit/market-structure": {
@@ -157,6 +165,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("symbol", "Linear perpetual symbol such as BTCUSDT.", default="BTCUSDT"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/coingecko/simple-price": {
@@ -168,6 +177,7 @@ def build_schema(base_url: str) -> dict:
                         qparam("asset_id", "CoinGecko asset ID, such as bitcoin.", default="bitcoin"),
                         qparam("vs_currency", "Quote currency such as usd.", default="usd"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/fear-greed/latest": {
@@ -175,6 +185,7 @@ def build_schema(base_url: str) -> dict:
                     "Get latest Fear and Greed index",
                     "Returns the latest crypto Fear and Greed sentiment value and classification.",
                     "getFearGreedLatest",
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/mempool/fees": {
@@ -182,6 +193,7 @@ def build_schema(base_url: str) -> dict:
                     "Get latest mempool fee recommendations",
                     "Returns recommended Bitcoin network fee rates from mempool.space.",
                     "getMempoolFees",
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/treasury/latest-avg-rates": {
@@ -189,6 +201,7 @@ def build_schema(base_url: str) -> dict:
                     "Get latest Treasury average rates snapshot",
                     "Returns latest average Treasury rates from Treasury Fiscal Data.",
                     "getTreasuryLatestAvgRates",
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/bls/series/{series_id}": {
@@ -200,6 +213,7 @@ def build_schema(base_url: str) -> dict:
                         pparam("series_id", "BLS series ID, such as CUUR0000SA0."),
                         qparam("limit", "Maximum number of observations to return.", default=12, schema_type="integer", minimum=1, maximum=24),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/fred/series/{series_id}": {
@@ -211,6 +225,7 @@ def build_schema(base_url: str) -> dict:
                         pparam("series_id", "FRED series ID, such as FEDFUNDS."),
                         qparam("limit", "Maximum number of observations to return.", default=12, schema_type="integer", minimum=1, maximum=24),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/bea/datasets": {
@@ -218,6 +233,7 @@ def build_schema(base_url: str) -> dict:
                     "List BEA datasets",
                     "Returns available BEA datasets. Requires BEA API key to be configured on the server.",
                     "getBeaDatasets",
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/bea/gdp": {
@@ -228,6 +244,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("year", "BEA year selector such as LAST5, 2024, or ALL.", default="LAST5"),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/fed/monetary-feed": {
@@ -238,6 +255,7 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("limit", "Number of feed items to return.", default=5, schema_type="integer", minimum=1, maximum=10),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/sec/company-tickers": {
@@ -250,6 +268,7 @@ def build_schema(base_url: str) -> dict:
                         qparam("exchange", "Optional exchange filter such as Nasdaq or NYSE."),
                         qparam("limit", "Maximum number of rows to return.", default=25, schema_type="integer", minimum=1, maximum=100),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/sec/submissions/{entity}": {
@@ -261,6 +280,7 @@ def build_schema(base_url: str) -> dict:
                         pparam("entity", "SEC ticker or CIK, such as IBIT."),
                         qparam("forms_limit", "Maximum number of recent filings to return.", default=10, schema_type="integer", minimum=1, maximum=20),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
             "/v1/sources/cftc/bitcoin-cot": {
@@ -272,25 +292,27 @@ def build_schema(base_url: str) -> dict:
                         qparam("exchange", "Exchange filter. Use cme or all.", default="cme"),
                         qparam("limit", "Maximum number of records to return.", default=4, schema_type="integer", minimum=1, maximum=10),
                     ],
+                    auth_enabled=auth_enabled,
                 )
             },
         },
-        "components": {
-            "schemas": {},
-            "securitySchemes": {
-                "bearerAuth": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "API token",
-                }
-            }
-        },
     }
+    components: dict = {"schemas": {}}
+    if auth_enabled:
+        components["securitySchemes"] = {
+            "bearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "API token",
+            }
+        }
+    schema["components"] = components
+    return schema
 
 
 def main() -> int:
     config = load_gateway_config()
-    schema = build_schema(config.public_base_url)
+    schema = build_schema(config.public_base_url, auth_enabled=bool(config.api_token))
     output_path = ROOT / "openapi-gpt-actions-expanded.json"
     output_path.write_text(json.dumps(schema, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Wrote {output_path}")
