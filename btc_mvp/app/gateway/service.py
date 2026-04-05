@@ -179,6 +179,9 @@ class GatewayService:
             "1h": 32,
             "4h": 30,
             "8h": 21,
+            "1d": 30,
+            "1w": 24,
+            "1M": 12,
         }
 
         ticker_24h = self._http.get_json(
@@ -204,9 +207,14 @@ class GatewayService:
             )
             timeframe_candles[interval] = [self._normalize_binance_candle(item) for item in rows]
 
+        spot_price = self._safe_float(current_price.get("price"))
+        derived_levels = self._build_multi_timeframe_levels(timeframe_candles)
+        support_resistance = self._build_support_resistance_levels(timeframe_candles, spot_price)
+        fibonacci_levels = self._build_multi_timeframe_fibonacci_levels(timeframe_candles)
+
         return {
             "symbol": symbol,
-            "spot_price": self._safe_float(current_price.get("price")),
+            "spot_price": spot_price,
             "ticker_24h": {
                 "price_change_pct": self._safe_float(ticker_24h.get("priceChangePercent")),
                 "high_price": self._safe_float(ticker_24h.get("highPrice")),
@@ -218,11 +226,13 @@ class GatewayService:
             "timeframes": {
                 interval: {
                     "summary": self._build_candle_structure_summary(candles),
-                    "raw_candles": candles[-8:],
+                    "raw_candles": candles[-self._raw_candle_tail_size(interval):],
                 }
                 for interval, candles in timeframe_candles.items()
             },
-            "derived_levels": self._build_multi_timeframe_levels(timeframe_candles),
+            "derived_levels": derived_levels,
+            "support_resistance": support_resistance,
+            "fibonacci_levels": fibonacci_levels,
         }
 
     def get_binance_derivatives_structure(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 12) -> dict[str, Any]:
@@ -1185,17 +1195,157 @@ class GatewayService:
         candles_1h = timeframe_candles.get("1h", [])
         candles_4h = timeframe_candles.get("4h", [])
         candles_8h = timeframe_candles.get("8h", [])
+        candles_1d = timeframe_candles.get("1d", [])
+        candles_1w = timeframe_candles.get("1w", [])
+        candles_1m = timeframe_candles.get("1M", [])
 
         return {
             "range_4h_high": self._max_high(candles_15m[-16:]),
             "range_4h_low": self._min_low(candles_15m[-16:]),
             "range_8h_high": self._max_high(candles_1h[-8:]),
             "range_8h_low": self._min_low(candles_1h[-8:]),
+            "range_24h_high": self._max_high(candles_1h[-24:]),
+            "range_24h_low": self._min_low(candles_1h[-24:]),
             "swing_3d_high": self._max_high(candles_4h[-18:]),
             "swing_3d_low": self._min_low(candles_4h[-18:]),
+            "daily_7d_high": self._max_high(candles_1d[-7:]),
+            "daily_7d_low": self._min_low(candles_1d[-7:]),
+            "daily_30d_high": self._max_high(candles_1d[-30:]),
+            "daily_30d_low": self._min_low(candles_1d[-30:]),
             "recent_8h_bar_high": self._max_high(candles_8h[-3:]),
             "recent_8h_bar_low": self._min_low(candles_8h[-3:]),
+            "weekly_12w_high": self._max_high(candles_1w[-12:]),
+            "weekly_12w_low": self._min_low(candles_1w[-12:]),
+            "weekly_24w_high": self._max_high(candles_1w[-24:]),
+            "weekly_24w_low": self._min_low(candles_1w[-24:]),
+            "monthly_12m_high": self._max_high(candles_1m[-12:]),
+            "monthly_12m_low": self._min_low(candles_1m[-12:]),
         }
+
+    @staticmethod
+    def _raw_candle_tail_size(interval: str) -> int:
+        return {
+            "15m": 12,
+            "1h": 12,
+            "4h": 12,
+            "8h": 10,
+            "1d": 20,
+            "1w": 20,
+            "1M": 12,
+        }.get(interval, 10)
+
+    def _build_support_resistance_levels(
+        self,
+        timeframe_candles: dict[str, list[dict[str, Any]]],
+        current_price: float | None,
+    ) -> dict[str, Any]:
+        candidates: list[dict[str, Any]] = []
+
+        def add_level(label: str, value: float | None, category: str) -> None:
+            if value is None:
+                return
+            candidates.append({"label": label, "value": round(value, 4), "category": category})
+
+        candles_15m = timeframe_candles.get("15m", [])
+        candles_1h = timeframe_candles.get("1h", [])
+        candles_4h = timeframe_candles.get("4h", [])
+        candles_1d = timeframe_candles.get("1d", [])
+        candles_1w = timeframe_candles.get("1w", [])
+        candles_1m = timeframe_candles.get("1M", [])
+
+        add_level("range_8h_high", self._max_high(candles_1h[-8:]), "intraday")
+        add_level("range_8h_low", self._min_low(candles_1h[-8:]), "intraday")
+        add_level("range_24h_high", self._max_high(candles_1h[-24:]), "intraday")
+        add_level("range_24h_low", self._min_low(candles_1h[-24:]), "intraday")
+        add_level("swing_3d_high", self._max_high(candles_4h[-18:]), "swing")
+        add_level("swing_3d_low", self._min_low(candles_4h[-18:]), "swing")
+        add_level("daily_7d_high", self._max_high(candles_1d[-7:]), "weekly_filter")
+        add_level("daily_7d_low", self._min_low(candles_1d[-7:]), "weekly_filter")
+        add_level("previous_week_high", self._candle_value(candles_1w, -2, "high"), "weekly_filter")
+        add_level("previous_week_low", self._candle_value(candles_1w, -2, "low"), "weekly_filter")
+        add_level("weekly_12w_high", self._max_high(candles_1w[-12:]), "multi_week")
+        add_level("weekly_12w_low", self._min_low(candles_1w[-12:]), "multi_week")
+        add_level("weekly_24w_high", self._max_high(candles_1w[-24:]), "multi_week")
+        add_level("weekly_24w_low", self._min_low(candles_1w[-24:]), "multi_week")
+        add_level("monthly_12m_high", self._max_high(candles_1m[-12:]), "monthly")
+        add_level("monthly_12m_low", self._min_low(candles_1m[-12:]), "monthly")
+
+        for fib_label, fib_map in self._build_multi_timeframe_fibonacci_levels(timeframe_candles).items():
+            if not isinstance(fib_map, dict):
+                continue
+            for ratio, value in fib_map.items():
+                if ratio in {"swing_high", "swing_low"}:
+                    continue
+                add_level(f"{fib_label}_{ratio}", self._safe_float(value), "fibonacci")
+
+        deduped = self._dedupe_levels(candidates)
+        supports = sorted(
+            [item for item in deduped if current_price is None or item["value"] <= current_price],
+            key=lambda item: (abs((current_price or item["value"]) - item["value"]), -item["value"]),
+        )[:8]
+        resistances = sorted(
+            [item for item in deduped if current_price is None or item["value"] >= current_price],
+            key=lambda item: (abs(item["value"] - (current_price or item["value"])), item["value"]),
+        )[:8]
+
+        return {
+            "spot_price": current_price,
+            "supports": supports,
+            "resistances": resistances,
+        }
+
+    def _build_multi_timeframe_fibonacci_levels(self, timeframe_candles: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+        fib_sources = {
+            "swing_3d": timeframe_candles.get("4h", [])[-18:],
+            "weekly_30d": timeframe_candles.get("1d", [])[-30:],
+            "multi_week_24w": timeframe_candles.get("1w", [])[-24:],
+        }
+
+        result: dict[str, Any] = {}
+        for label, candles in fib_sources.items():
+            levels = self._build_fibonacci_levels(candles)
+            if levels:
+                result[label] = levels
+        return result
+
+    def _build_fibonacci_levels(self, candles: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not candles:
+            return None
+        swing_high = self._max_high(candles)
+        swing_low = self._min_low(candles)
+        if swing_high is None or swing_low is None or swing_high == swing_low:
+            return None
+        diff = swing_high - swing_low
+        return {
+            "swing_high": round(swing_high, 4),
+            "swing_low": round(swing_low, 4),
+            "0.236": round(swing_high - diff * 0.236, 4),
+            "0.382": round(swing_high - diff * 0.382, 4),
+            "0.5": round(swing_high - diff * 0.5, 4),
+            "0.618": round(swing_high - diff * 0.618, 4),
+            "0.786": round(swing_high - diff * 0.786, 4),
+        }
+
+    @staticmethod
+    def _dedupe_levels(levels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[float] = set()
+        deduped: list[dict[str, Any]] = []
+        for item in levels:
+            rounded_value = round(float(item["value"]), 2)
+            if rounded_value in seen:
+                continue
+            seen.add(rounded_value)
+            deduped.append(item)
+        return deduped
+
+    @staticmethod
+    def _candle_value(candles: list[dict[str, Any]], index: int, key: str) -> float | None:
+        if not candles:
+            return None
+        try:
+            return candles[index].get(key)
+        except IndexError:
+            return None
 
     def _build_binance_basis_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         if not rows:
