@@ -162,6 +162,32 @@ def binance_market(
     return service.get_binance_market(symbol.upper())
 
 
+@protected.get("/v1/sources/binance/derivatives-structure", tags=["Sources"], summary="Get Binance derivatives structure")
+def binance_derivatives_structure(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    period: str = Query("1h", description="History period such as 15m, 30m, 1h, 2h, 4h, or 6h."),
+    limit: int = Query(12, ge=3, le=30, description="Number of historical points to return."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_binance_derivatives_structure(symbol.upper(), period=period, limit=limit)
+
+
+@protected.get("/v1/sources/binance/multi-timeframe-structure", tags=["Sources"], summary="Get Binance multi-timeframe structure")
+def binance_multi_timeframe_structure(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_binance_multi_timeframe_structure(symbol.upper())
+
+
+@protected.get("/v1/sources/bybit/market-structure", tags=["Sources"], summary="Get Bybit derivatives validation snapshot")
+def bybit_market_structure(
+    symbol: str = Query("BTCUSDT", description="Linear perpetual symbol such as BTCUSDT."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_bybit_market_structure(symbol.upper())
+
+
 @protected.get("/v1/sources/coingecko/simple-price", tags=["Sources"], summary="Get CoinGecko simple price data")
 def coingecko_simple_price(
     asset_id: str = Query("bitcoin", description="CoinGecko asset ID, for example bitcoin."),
@@ -171,7 +197,7 @@ def coingecko_simple_price(
     return service.get_coingecko_simple_price(asset_id=asset_id, vs_currency=vs_currency)
 
 
-@protected.get("/v1/sources/coinglass/market-structure", tags=["Sources"], summary="Get CoinGlass derivatives structure snapshot")
+@protected.get("/v1/sources/coinglass/market-structure", tags=["Sources"], summary="Get CoinGlass derivatives structure snapshot", include_in_schema=False)
 def coinglass_market_structure(
     symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT. The server normalizes this to the coin symbol used by CoinGlass."),
     exchange: str = Query("OKX", description="Exchange to focus on, such as OKX or Binance."),

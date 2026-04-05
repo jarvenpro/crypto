@@ -22,6 +22,7 @@ MEMPOOL_FEES_URL = "https://mempool.space/api/v1/fees/recommended"
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 COINGLASS_BASE = "https://open-api-v4.coinglass.com"
+BYBIT_BASE = "https://api.bybit.com"
 
 COINGECKO_IDS = {
     "BTC": "bitcoin",
@@ -72,7 +73,9 @@ class GatewayService:
             "symbol": symbol,
             "sources": {
                 "binance": self._capture(lambda: self.get_binance_market(symbol)),
-                "coinglass": self._capture(lambda: self.get_coinglass_market_structure(symbol=symbol, exchange="OKX", interval="1h")),
+                "binance_structure": self._capture(lambda: self.get_binance_multi_timeframe_structure(symbol)),
+                "binance_derivatives": self._capture(lambda: self.get_binance_derivatives_structure(symbol)),
+                "bybit": self._capture(lambda: self.get_bybit_market_structure(symbol)),
                 "fear_greed": self._capture(self.get_fear_greed_latest),
                 "mempool": self._capture(self.get_mempool_recommended_fees) if root_symbol == "BTC" else self._skipped("Mempool data is only mapped for BTC."),
             },
@@ -169,6 +172,243 @@ class GatewayService:
             "recent_5m_candles": [self._normalize_binance_candle(item) for item in candles],
         }
 
+    def get_binance_multi_timeframe_structure(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        symbol = symbol.upper()
+        interval_limits = {
+            "15m": 32,
+            "1h": 32,
+            "4h": 30,
+            "8h": 21,
+        }
+
+        ticker_24h = self._http.get_json(
+            "binance",
+            f"{BINANCE_SPOT_BASE}/api/v3/ticker/24hr",
+            params={"symbol": symbol},
+            ttl_seconds=15,
+        )
+        current_price = self._http.get_json(
+            "binance",
+            f"{BINANCE_SPOT_BASE}/api/v3/ticker/price",
+            params={"symbol": symbol},
+            ttl_seconds=10,
+        )
+
+        timeframe_candles: dict[str, list[dict[str, Any]]] = {}
+        for interval, limit in interval_limits.items():
+            rows = self._http.get_json(
+                "binance",
+                f"{BINANCE_SPOT_BASE}/api/v3/klines",
+                params={"symbol": symbol, "interval": interval, "limit": limit},
+                ttl_seconds=20,
+            )
+            timeframe_candles[interval] = [self._normalize_binance_candle(item) for item in rows]
+
+        return {
+            "symbol": symbol,
+            "spot_price": self._safe_float(current_price.get("price")),
+            "ticker_24h": {
+                "price_change_pct": self._safe_float(ticker_24h.get("priceChangePercent")),
+                "high_price": self._safe_float(ticker_24h.get("highPrice")),
+                "low_price": self._safe_float(ticker_24h.get("lowPrice")),
+                "volume": self._safe_float(ticker_24h.get("volume")),
+                "quote_volume": self._safe_float(ticker_24h.get("quoteVolume")),
+                "weighted_avg_price": self._safe_float(ticker_24h.get("weightedAvgPrice")),
+            },
+            "timeframes": {
+                interval: {
+                    "summary": self._build_candle_structure_summary(candles),
+                    "raw_candles": candles[-8:],
+                }
+                for interval, candles in timeframe_candles.items()
+            },
+            "derived_levels": self._build_multi_timeframe_levels(timeframe_candles),
+        }
+
+    def get_binance_derivatives_structure(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 12) -> dict[str, Any]:
+        symbol = symbol.upper()
+        period = period.lower()
+
+        premium_index = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/fapi/v1/premiumIndex",
+            params={"symbol": symbol},
+            ttl_seconds=10,
+        )
+        basis_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/basis",
+            params={"pair": symbol, "contractType": "PERPETUAL", "period": period, "limit": limit},
+            ttl_seconds=20,
+        )
+        open_interest_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/openInterestHist",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=20,
+        )
+        top_position_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/topLongShortPositionRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=20,
+        )
+        top_account_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/topLongShortAccountRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=20,
+        )
+        global_ratio_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/globalLongShortAccountRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=20,
+        )
+        taker_volume_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/takerlongshortRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=20,
+        )
+
+        normalized_basis = [self._normalize_binance_basis_row(row) for row in basis_rows if isinstance(row, dict)]
+        normalized_open_interest = [self._normalize_binance_open_interest_hist_row(row) for row in open_interest_rows if isinstance(row, dict)]
+        normalized_top_position = [self._normalize_binance_ratio_row(row, "longShortRatio") for row in top_position_rows if isinstance(row, dict)]
+        normalized_top_account = [self._normalize_binance_ratio_row(row, "longShortRatio") for row in top_account_rows if isinstance(row, dict)]
+        normalized_global_ratio = [self._normalize_binance_ratio_row(row, "longShortRatio") for row in global_ratio_rows if isinstance(row, dict)]
+        normalized_taker_volume = [self._normalize_binance_taker_volume_row(row) for row in taker_volume_rows if isinstance(row, dict)]
+
+        current_mark_price = self._safe_float(premium_index.get("markPrice"))
+        current_index_price = self._safe_float(premium_index.get("indexPrice"))
+        current_spread = self._mark_index_spread(current_mark_price, current_index_price)
+
+        top_position_summary = self._build_ratio_summary(normalized_top_position, "top_trader_position_ratio")
+        top_account_summary = self._build_ratio_summary(normalized_top_account, "top_trader_account_ratio")
+        global_ratio_summary = self._build_ratio_summary(normalized_global_ratio, "global_long_short_ratio")
+        taker_volume_summary = self._build_taker_volume_summary(normalized_taker_volume)
+        open_interest_summary = self._build_open_interest_hist_summary(normalized_open_interest)
+        basis_summary = self._build_binance_basis_summary(normalized_basis)
+
+        return {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "current": {
+                "mark_price": current_mark_price,
+                "index_price": current_index_price,
+                "estimated_settlement_price": self._safe_float(premium_index.get("estimatedSettlePrice")),
+                "last_funding_rate": self._safe_float(premium_index.get("lastFundingRate")),
+                "interest_rate": self._safe_float(premium_index.get("interestRate")),
+                "next_funding_time": premium_index.get("nextFundingTime"),
+                "time": premium_index.get("time"),
+                "mark_index_spread": current_spread,
+                "mark_index_spread_pct": self._pct_of_value(current_spread, current_index_price),
+            },
+            "summary": {
+                "basis": basis_summary,
+                "open_interest": open_interest_summary,
+                "top_trader_position_ratio": top_position_summary,
+                "top_trader_account_ratio": top_account_summary,
+                "global_long_short_ratio": global_ratio_summary,
+                "taker_buy_sell_volume": taker_volume_summary,
+                "composite_view": self._build_binance_derivatives_composite_view(
+                    basis_summary=basis_summary,
+                    open_interest_summary=open_interest_summary,
+                    top_position_summary=top_position_summary,
+                    top_account_summary=top_account_summary,
+                    global_ratio_summary=global_ratio_summary,
+                    taker_volume_summary=taker_volume_summary,
+                ),
+            },
+            "raw": {
+                "basis_history": normalized_basis[-8:],
+                "open_interest_history": normalized_open_interest[-8:],
+                "top_trader_position_ratio_history": normalized_top_position[-8:],
+                "top_trader_account_ratio_history": normalized_top_account[-8:],
+                "global_long_short_ratio_history": normalized_global_ratio[-8:],
+                "taker_buy_sell_volume_history": normalized_taker_volume[-8:],
+            },
+        }
+
+    def get_bybit_market_structure(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        symbol = symbol.upper()
+        ticker_result = self._bybit_get_result(
+            "/v5/market/tickers",
+            params={"category": "linear", "symbol": symbol},
+        )
+        ticker_rows = ticker_result.get("list", [])
+        ticker = ticker_rows[0] if ticker_rows else {}
+
+        price_1h_rows = self._normalize_bybit_kline_rows(
+            self._bybit_get_result(
+                "/v5/market/kline",
+                params={"category": "linear", "symbol": symbol, "interval": "60", "limit": 32},
+            ).get("list", [])
+        )
+        price_4h_rows = self._normalize_bybit_kline_rows(
+            self._bybit_get_result(
+                "/v5/market/kline",
+                params={"category": "linear", "symbol": symbol, "interval": "240", "limit": 24},
+            ).get("list", [])
+        )
+        mark_price_rows = self._normalize_bybit_kline_rows(
+            self._bybit_get_result(
+                "/v5/market/mark-price-kline",
+                params={"category": "linear", "symbol": symbol, "interval": "60", "limit": 24},
+            ).get("list", [])
+        )
+        open_interest_rows = self._normalize_bybit_open_interest_rows(
+            self._bybit_get_result(
+                "/v5/market/open-interest",
+                params={"category": "linear", "symbol": symbol, "intervalTime": "1h", "limit": 24},
+            ).get("list", [])
+        )
+        funding_rows = self._normalize_bybit_funding_rows(
+            self._bybit_get_result(
+                "/v5/market/funding/history",
+                params={"category": "linear", "symbol": symbol, "limit": 20},
+            ).get("list", [])
+        )
+        long_short_rows = self._normalize_bybit_account_ratio_rows(
+            self._bybit_get_result(
+                "/v5/market/account-ratio",
+                params={"category": "linear", "symbol": symbol, "period": "1h", "limit": 24},
+            ).get("list", [])
+        )
+
+        return {
+            "symbol": symbol,
+            "exchange": "BYBIT",
+            "ticker": {
+                "last_price": self._safe_float(ticker.get("lastPrice")),
+                "mark_price": self._safe_float(ticker.get("markPrice")),
+                "index_price": self._safe_float(ticker.get("indexPrice")),
+                "funding_rate": self._safe_float(ticker.get("fundingRate")),
+                "open_interest": self._safe_float(ticker.get("openInterest")),
+                "open_interest_value": self._safe_float(ticker.get("openInterestValue")),
+                "price_24h_pct": self._safe_float(ticker.get("price24hPcnt")),
+                "turnover_24h": self._safe_float(ticker.get("turnover24h")),
+                "volume_24h": self._safe_float(ticker.get("volume24h")),
+            },
+            "summary": {
+                "price_1h": self._build_candle_structure_summary(price_1h_rows),
+                "price_4h": self._build_candle_structure_summary(price_4h_rows),
+                "mark_price_1h": self._build_candle_structure_summary(mark_price_rows),
+                "open_interest": self._build_ohlc_summary(open_interest_rows, value_key_candidates=("close", "value", "openInterest")),
+                "funding_rate": self._build_ohlc_summary(funding_rows, value_key_candidates=("close", "value", "fundingRate")),
+                "long_short_ratio": self._build_ohlc_summary(long_short_rows, value_key_candidates=("close", "value", "longShortRatio")),
+            },
+            "raw": {
+                "price_1h_candles": price_1h_rows[-8:],
+                "price_4h_candles": price_4h_rows[-8:],
+                "mark_price_1h_candles": mark_price_rows[-8:],
+                "open_interest_history": open_interest_rows[-8:],
+                "funding_rate_history": funding_rows[-8:],
+                "long_short_ratio_history": long_short_rows[-8:],
+            },
+        }
+
     def get_coingecko_simple_price(self, asset_id: str, vs_currency: str = "usd") -> dict[str, Any]:
         headers: dict[str, str] = {}
         if self._config.coingecko_pro_api_key:
@@ -216,32 +456,64 @@ class GatewayService:
             ]
         )
 
-        open_interest = self._get_coinglass_open_interest(
-            symbol_candidates=symbol_candidates,
-            asset_symbol=normalized_asset_symbol,
-            exchange=normalized_exchange,
-            interval=interval,
+        unavailable: list[dict[str, Any]] = []
+
+        open_interest = self._coinglass_capture_component(
+            unavailable,
+            "open_interest",
+            lambda: self._get_coinglass_open_interest(
+                symbol_candidates=symbol_candidates,
+                asset_symbol=normalized_asset_symbol,
+                exchange=normalized_exchange,
+                interval=interval,
+            ),
         )
-        funding = self._coinglass_get_first_available_data(
-            "/api/futures/funding-rate/history",
-            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+        funding = self._coinglass_capture_component(
+            unavailable,
+            "funding_rate",
+            lambda: self._coinglass_get_first_available_data(
+                "/api/futures/funding-rate/history",
+                self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+            ),
         )
-        oi_weighted_funding = self._coinglass_get_first_available_data(
-            "/api/futures/funding-rate/oi-weight-history",
-            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+        oi_weighted_funding = self._coinglass_capture_component(
+            unavailable,
+            "oi_weighted_funding_rate",
+            lambda: self._coinglass_get_first_available_data(
+                "/api/futures/funding-rate/oi-weight-history",
+                self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+            ),
         )
-        long_short_ratio = self._coinglass_get_first_available_data(
-            "/api/futures/global-long-short-account-ratio/history",
-            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+        long_short_ratio = self._coinglass_capture_component(
+            unavailable,
+            "long_short_ratio",
+            lambda: self._coinglass_get_first_available_data(
+                "/api/futures/global-long-short-account-ratio/history",
+                self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+            ),
         )
-        liquidation = self._coinglass_get_first_available_data(
-            "/api/futures/liquidation/history",
-            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+        liquidation = self._coinglass_capture_component(
+            unavailable,
+            "liquidation",
+            lambda: self._coinglass_get_first_available_data(
+                "/api/futures/liquidation/history",
+                self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
+            ),
         )
-        exchange_rank = self._coinglass_get_data(
-            "/api/futures/exchange-rank",
-            params=None,
+        exchange_rank = self._coinglass_capture_component(
+            unavailable,
+            "exchange_rank",
+            lambda: self._coinglass_get_data(
+                "/api/futures/exchange-rank",
+                params=None,
+            ),
         )
+
+        if all(component is None for component in (open_interest, funding, oi_weighted_funding, long_short_ratio, liquidation, exchange_rank)):
+            detail = "CoinGlass returned no usable market-structure components."
+            if unavailable:
+                detail += f" Components: {', '.join(item['component'] for item in unavailable)}."
+            raise UpstreamServiceError("coinglass", detail)
 
         return {
             "symbol": resolved_pair_symbol,
@@ -250,6 +522,7 @@ class GatewayService:
             "symbol_candidates": symbol_candidates,
             "exchange": normalized_exchange,
             "interval": interval,
+            "unavailable_components": unavailable,
             "summary": {
                 "open_interest": self._build_ohlc_summary(open_interest, value_key_candidates=("close", "value", "openInterest")),
                 "funding_rate": self._build_ohlc_summary(funding, value_key_candidates=("close", "value", "fundingRate")),
@@ -600,6 +873,27 @@ class GatewayService:
             raise UpstreamServiceError("coinglass", f"CoinGlass returned no data for {path}.")
         return data
 
+    def _bybit_get_result(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        payload = self._http.get_json(
+            "bybit",
+            f"{BYBIT_BASE}{path}",
+            params=params,
+            ttl_seconds=20,
+        )
+        if not isinstance(payload, dict):
+            raise UpstreamServiceError("bybit", f"Bybit returned an unexpected payload: {payload}")
+
+        if payload.get("retCode") not in (0, "0", None):
+            raise UpstreamServiceError(
+                "bybit",
+                f"Bybit error {payload.get('retCode')}: {payload.get('retMsg') or payload.get('retExtInfo') or 'unknown error'}",
+            )
+
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise UpstreamServiceError("bybit", f"Bybit returned no result for {path}.")
+        return result
+
     def _coinglass_get_first_available_data(self, path: str, param_variants: list[dict[str, Any]]) -> Any:
         attempts: list[str] = []
         last_error: UpstreamServiceError | None = None
@@ -628,6 +922,19 @@ class GatewayService:
             detail,
             status_code=last_error.status_code if last_error else 502,
         )
+
+    @staticmethod
+    def _coinglass_capture_component(unavailable: list[dict[str, Any]], component: str, func) -> Any:
+        try:
+            return func()
+        except UpstreamServiceError as exc:
+            unavailable.append(
+                {
+                    "component": component,
+                    "reason": exc.detail,
+                }
+            )
+            return None
 
     def _get_coinglass_open_interest(
         self,
@@ -758,12 +1065,268 @@ class GatewayService:
     def _normalize_binance_candle(item: list[Any]) -> dict[str, Any]:
         return {
             "open_time": datetime.fromtimestamp(item[0] / 1000, tz=timezone.utc).replace(microsecond=0).isoformat(),
+            "close_time": datetime.fromtimestamp(item[6] / 1000, tz=timezone.utc).replace(microsecond=0).isoformat(),
             "open": float(item[1]),
             "high": float(item[2]),
             "low": float(item[3]),
             "close": float(item[4]),
             "volume": float(item[5]),
+            "quote_volume": float(item[7]),
+            "trade_count": int(item[8]),
         }
+
+    @staticmethod
+    def _normalize_binance_basis_row(row: dict[str, Any]) -> dict[str, Any]:
+        basis = GatewayService._safe_float(row.get("basis"))
+        basis_rate = GatewayService._safe_float(row.get("basisRate"))
+        annualized_basis_rate = GatewayService._safe_float(row.get("annualizedBasisRate"))
+        futures_price = GatewayService._safe_float(row.get("futuresPrice"))
+        index_price = GatewayService._safe_float(row.get("indexPrice"))
+        return {
+            "time": row.get("timestamp"),
+            "contract_type": row.get("contractType"),
+            "basis": basis,
+            "basisRate": basis_rate,
+            "annualizedBasisRate": annualized_basis_rate,
+            "futuresPrice": futures_price,
+            "indexPrice": index_price,
+            "value": basis_rate if basis_rate is not None else basis,
+            "close": basis_rate if basis_rate is not None else basis,
+        }
+
+    @staticmethod
+    def _normalize_binance_open_interest_hist_row(row: dict[str, Any]) -> dict[str, Any]:
+        open_interest = GatewayService._safe_float(row.get("sumOpenInterest"))
+        open_interest_value = GatewayService._safe_float(row.get("sumOpenInterestValue"))
+        return {
+            "time": row.get("timestamp"),
+            "sumOpenInterest": open_interest,
+            "sumOpenInterestValue": open_interest_value,
+            "value": open_interest_value if open_interest_value is not None else open_interest,
+            "close": open_interest_value if open_interest_value is not None else open_interest,
+            "openInterest": open_interest,
+        }
+
+    @staticmethod
+    def _normalize_binance_ratio_row(row: dict[str, Any], value_key: str) -> dict[str, Any]:
+        ratio = GatewayService._safe_float(row.get(value_key))
+        long_account = GatewayService._safe_float(row.get("longAccount"))
+        short_account = GatewayService._safe_float(row.get("shortAccount"))
+        return {
+            "time": row.get("timestamp"),
+            "longAccount": long_account,
+            "shortAccount": short_account,
+            "longShortRatio": ratio,
+            "value": ratio,
+            "close": ratio,
+        }
+
+    @staticmethod
+    def _normalize_binance_taker_volume_row(row: dict[str, Any]) -> dict[str, Any]:
+        buy_vol = GatewayService._safe_float(row.get("buyVol"))
+        sell_vol = GatewayService._safe_float(row.get("sellVol"))
+        ratio = GatewayService._safe_float(row.get("buySellRatio"))
+        return {
+            "time": row.get("timestamp"),
+            "buyVol": buy_vol,
+            "sellVol": sell_vol,
+            "buySellRatio": ratio,
+            "value": ratio,
+            "close": ratio,
+        }
+
+    @staticmethod
+    def _mark_index_spread(mark_price: float | None, index_price: float | None) -> float | None:
+        if mark_price is None or index_price is None:
+            return None
+        return round(mark_price - index_price, 6)
+
+    def _build_candle_structure_summary(self, candles: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not candles:
+            return None
+
+        latest = candles[-1]
+        previous = candles[-2] if len(candles) > 1 else None
+        highs = [candle["high"] for candle in candles]
+        lows = [candle["low"] for candle in candles]
+        closes = [candle["close"] for candle in candles]
+        total_volume = sum(candle.get("volume", 0.0) for candle in candles)
+        total_quote_volume = sum(candle.get("quote_volume", 0.0) for candle in candles)
+
+        atr = self._compute_average_true_range(candles)
+        latest_close = latest["close"]
+        window_high = max(highs)
+        window_low = min(lows)
+        window_open = candles[0]["open"]
+
+        return {
+            "bars": len(candles),
+            "latest_open_time": latest.get("open_time"),
+            "latest_close": latest_close,
+            "previous_close": previous["close"] if previous else None,
+            "window_open": window_open,
+            "window_change_pct": self._pct_change(window_open, latest_close),
+            "last_bar_change_pct": self._pct_change(latest["open"], latest_close),
+            "window_high": window_high,
+            "window_low": window_low,
+            "window_range_pct": self._range_pct(window_low, window_high, latest_close),
+            "distance_to_window_high_pct": self._distance_pct(latest_close, window_high),
+            "distance_to_window_low_pct": self._distance_pct(window_low, latest_close),
+            "atr": atr,
+            "atr_pct": self._pct_of_value(atr, latest_close),
+            "approx_vwap": round(total_quote_volume / total_volume, 4) if total_volume else None,
+            "volume_total": round(total_volume, 4),
+            "trend": self._classify_trend(window_open, latest_close),
+            "close_position_in_range": self._close_position_in_range(window_low, window_high, latest_close),
+        }
+
+    def _build_multi_timeframe_levels(self, timeframe_candles: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+        candles_15m = timeframe_candles.get("15m", [])
+        candles_1h = timeframe_candles.get("1h", [])
+        candles_4h = timeframe_candles.get("4h", [])
+        candles_8h = timeframe_candles.get("8h", [])
+
+        return {
+            "range_4h_high": self._max_high(candles_15m[-16:]),
+            "range_4h_low": self._min_low(candles_15m[-16:]),
+            "range_8h_high": self._max_high(candles_1h[-8:]),
+            "range_8h_low": self._min_low(candles_1h[-8:]),
+            "swing_3d_high": self._max_high(candles_4h[-18:]),
+            "swing_3d_low": self._min_low(candles_4h[-18:]),
+            "recent_8h_bar_high": self._max_high(candles_8h[-3:]),
+            "recent_8h_bar_low": self._min_low(candles_8h[-3:]),
+        }
+
+    def _build_binance_basis_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        latest = rows[-1]
+        previous = rows[-2] if len(rows) > 1 else None
+        latest_basis_rate = latest.get("basisRate")
+        previous_basis_rate = previous.get("basisRate") if previous else None
+        latest_basis = latest.get("basis")
+
+        state = "neutral"
+        if latest_basis is not None:
+            if latest_basis > 0:
+                state = "contango"
+            elif latest_basis < 0:
+                state = "backwardation"
+
+        return {
+            "latest_time": latest.get("time"),
+            "latest_basis": latest_basis,
+            "latest_basis_rate": latest_basis_rate,
+            "latest_annualized_basis_rate": latest.get("annualizedBasisRate"),
+            "futures_price": latest.get("futuresPrice"),
+            "index_price": latest.get("indexPrice"),
+            "basis_rate_change_pct": self._compute_change_pct(previous_basis_rate, latest_basis_rate),
+            "trend": self._classify_trend(previous_basis_rate, latest_basis_rate),
+            "state": state,
+        }
+
+    def _build_open_interest_hist_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        if not rows:
+            return None
+        summary = self._build_ohlc_summary(rows, value_key_candidates=("sumOpenInterestValue", "sumOpenInterest", "value"))
+        if summary is None:
+            return None
+        latest = rows[-1]
+        summary["latest_open_interest"] = latest.get("sumOpenInterest")
+        summary["latest_open_interest_value"] = latest.get("sumOpenInterestValue")
+        return summary
+
+    def _build_ratio_summary(self, rows: list[dict[str, Any]], label: str) -> dict[str, Any] | None:
+        summary = self._build_ohlc_summary(rows, value_key_candidates=("longShortRatio", "value", "close"))
+        if summary is None:
+            return None
+        latest_value = summary.get("latest_value")
+        summary["label"] = label
+        summary["bias"] = self._classify_ratio_bias(latest_value)
+        if rows:
+            latest = rows[-1]
+            summary["latest_long_account"] = latest.get("longAccount")
+            summary["latest_short_account"] = latest.get("shortAccount")
+        return summary
+
+    def _build_taker_volume_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        summary = self._build_ohlc_summary(rows, value_key_candidates=("buySellRatio", "value", "close"))
+        if summary is None:
+            return None
+        latest = rows[-1]
+        buy_vol = latest.get("buyVol")
+        sell_vol = latest.get("sellVol")
+        summary["latest_buy_volume"] = buy_vol
+        summary["latest_sell_volume"] = sell_vol
+        summary["net_buy_minus_sell_volume"] = round((buy_vol or 0.0) - (sell_vol or 0.0), 4)
+        summary["bias"] = self._classify_taker_flow(summary.get("latest_value"))
+        return summary
+
+    def _build_binance_derivatives_composite_view(
+        self,
+        *,
+        basis_summary: dict[str, Any] | None,
+        open_interest_summary: dict[str, Any] | None,
+        top_position_summary: dict[str, Any] | None,
+        top_account_summary: dict[str, Any] | None,
+        global_ratio_summary: dict[str, Any] | None,
+        taker_volume_summary: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        components: list[str] = []
+
+        if open_interest_summary and open_interest_summary.get("trend") == "up":
+            components.append("open_interest_building")
+        elif open_interest_summary and open_interest_summary.get("trend") == "down":
+            components.append("open_interest_unwinding")
+
+        if basis_summary and basis_summary.get("state") == "contango":
+            components.append("positive_basis")
+        elif basis_summary and basis_summary.get("state") == "backwardation":
+            components.append("negative_basis")
+
+        for summary in (top_position_summary, top_account_summary, global_ratio_summary, taker_volume_summary):
+            if not summary:
+                continue
+            bias = summary.get("bias")
+            if bias and bias != "balanced":
+                components.append(bias)
+
+        bullish_count = sum(1 for item in components if item in {"positive_basis", "long_crowded", "buyers_aggressive"})
+        bearish_count = sum(1 for item in components if item in {"negative_basis", "short_crowded", "sellers_aggressive"})
+
+        if bullish_count > bearish_count:
+            direction_bias = "bullish_bias"
+        elif bearish_count > bullish_count:
+            direction_bias = "bearish_bias"
+        else:
+            direction_bias = "mixed_bias"
+
+        return {
+            "direction_bias": direction_bias,
+            "signals": components,
+            "bullish_signal_count": bullish_count,
+            "bearish_signal_count": bearish_count,
+        }
+
+    @staticmethod
+    def _classify_ratio_bias(value: float | None) -> str | None:
+        if value is None:
+            return None
+        if value >= 1.1:
+            return "long_crowded"
+        if value <= 0.9:
+            return "short_crowded"
+        return "balanced"
+
+    @staticmethod
+    def _classify_taker_flow(value: float | None) -> str | None:
+        if value is None:
+            return None
+        if value >= 1.1:
+            return "buyers_aggressive"
+        if value <= 0.9:
+            return "sellers_aggressive"
+        return "balanced"
 
     @staticmethod
     def _safe_float(value: Any) -> float | None:
@@ -780,6 +1343,86 @@ class GatewayService:
     @staticmethod
     def _normalize_coinglass_pair_symbol(symbol: str) -> str:
         return symbol.strip().upper().replace("-", "").replace("_", "").replace("/", "")
+
+    @staticmethod
+    def _normalize_bybit_kline_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, list) or len(item) < 7:
+                continue
+            normalized.append(
+                {
+                    "open_time": datetime.fromtimestamp(int(item[0]) / 1000, tz=timezone.utc).replace(microsecond=0).isoformat(),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                    "quote_volume": float(item[6]),
+                }
+            )
+        return sorted(normalized, key=lambda row: row["open_time"])
+
+    @staticmethod
+    def _normalize_bybit_open_interest_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            value = GatewayService._safe_float(item.get("openInterest"))
+            if value is None:
+                continue
+            normalized.append(
+                {
+                    "time": item.get("timestamp"),
+                    "value": value,
+                    "close": value,
+                    "openInterest": value,
+                }
+            )
+        return sorted(normalized, key=lambda row: str(row.get("time") or ""))
+
+    @staticmethod
+    def _normalize_bybit_funding_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            value = GatewayService._safe_float(item.get("fundingRate"))
+            if value is None:
+                continue
+            normalized.append(
+                {
+                    "time": item.get("fundingRateTimestamp"),
+                    "value": value,
+                    "close": value,
+                    "fundingRate": value,
+                }
+            )
+        return sorted(normalized, key=lambda row: str(row.get("time") or ""))
+
+    @staticmethod
+    def _normalize_bybit_account_ratio_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            buy_ratio = GatewayService._safe_float(item.get("buyRatio"))
+            sell_ratio = GatewayService._safe_float(item.get("sellRatio"))
+            if buy_ratio is None or sell_ratio in (None, 0):
+                continue
+            long_short_ratio = buy_ratio / sell_ratio
+            normalized.append(
+                {
+                    "time": item.get("timestamp"),
+                    "buyRatio": buy_ratio,
+                    "sellRatio": sell_ratio,
+                    "longShortRatio": round(long_short_ratio, 6),
+                    "value": round(long_short_ratio, 6),
+                    "close": round(long_short_ratio, 6),
+                }
+            )
+        return sorted(normalized, key=lambda row: str(row.get("time") or ""))
 
     def _build_ohlc_summary(self, rows: Any, value_key_candidates: tuple[str, ...]) -> dict[str, Any] | None:
         normalized_rows = self._normalize_rows(rows)
@@ -798,6 +1441,64 @@ class GatewayService:
             "change_pct": self._compute_change_pct(previous_value, latest_value),
             "trend": self._classify_trend(previous_value, latest_value),
         }
+
+    @staticmethod
+    def _compute_average_true_range(candles: list[dict[str, Any]]) -> float | None:
+        if len(candles) < 2:
+            return None
+        true_ranges: list[float] = []
+        previous_close = candles[0]["close"]
+        for candle in candles[1:]:
+            high = candle["high"]
+            low = candle["low"]
+            tr = max(high - low, abs(high - previous_close), abs(low - previous_close))
+            true_ranges.append(tr)
+            previous_close = candle["close"]
+        if not true_ranges:
+            return None
+        return round(sum(true_ranges) / len(true_ranges), 4)
+
+    @staticmethod
+    def _pct_change(start_value: float | None, end_value: float | None) -> float | None:
+        if start_value in (None, 0) or end_value is None:
+            return None
+        return round(((end_value - start_value) / abs(start_value)) * 100, 4)
+
+    @staticmethod
+    def _range_pct(low_value: float | None, high_value: float | None, reference_value: float | None) -> float | None:
+        if low_value is None or high_value is None or reference_value in (None, 0):
+            return None
+        return round(((high_value - low_value) / abs(reference_value)) * 100, 4)
+
+    @staticmethod
+    def _distance_pct(start_value: float | None, end_value: float | None) -> float | None:
+        if start_value in (None, 0) or end_value is None:
+            return None
+        return round(((end_value - start_value) / abs(start_value)) * 100, 4)
+
+    @staticmethod
+    def _pct_of_value(value: float | None, reference_value: float | None) -> float | None:
+        if value is None or reference_value in (None, 0):
+            return None
+        return round((value / abs(reference_value)) * 100, 4)
+
+    @staticmethod
+    def _close_position_in_range(low_value: float | None, high_value: float | None, close_value: float | None) -> float | None:
+        if low_value is None or high_value is None or close_value is None or high_value == low_value:
+            return None
+        return round((close_value - low_value) / (high_value - low_value), 4)
+
+    @staticmethod
+    def _max_high(candles: list[dict[str, Any]]) -> float | None:
+        if not candles:
+            return None
+        return max(candle["high"] for candle in candles)
+
+    @staticmethod
+    def _min_low(candles: list[dict[str, Any]]) -> float | None:
+        if not candles:
+            return None
+        return min(candle["low"] for candle in candles)
 
     def _build_liquidation_summary(self, rows: Any) -> dict[str, Any] | None:
         normalized_rows = self._normalize_rows(rows)
