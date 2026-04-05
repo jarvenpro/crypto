@@ -23,6 +23,7 @@ class GatewayConfig:
     bea_api_key: str
     coingecko_demo_api_key: str
     coingecko_pro_api_key: str
+    coinglass_api_key: str
 
     @property
     def fred_enabled(self) -> bool:
@@ -39,6 +40,10 @@ class GatewayConfig:
     @property
     def coingecko_auth_enabled(self) -> bool:
         return bool(self.coingecko_demo_api_key or self.coingecko_pro_api_key)
+
+    @property
+    def coinglass_enabled(self) -> bool:
+        return bool(self.coinglass_api_key)
 
 
 def load_gateway_config() -> GatewayConfig:
@@ -60,4 +65,5 @@ def load_gateway_config() -> GatewayConfig:
         bea_api_key=os.getenv("BEA_API_KEY", ""),
         coingecko_demo_api_key=os.getenv("COINGECKO_DEMO_API_KEY", ""),
         coingecko_pro_api_key=os.getenv("COINGECKO_PRO_API_KEY", ""),
+        coinglass_api_key=os.getenv("COINGLASS_API_KEY", ""),
     )
