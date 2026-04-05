@@ -3,7 +3,7 @@
   "info": {
     "title": "Crypto GPT Aggregator API",
     "version": "1.2.0",
-    "description": "Expanded Custom GPT action schema for real-time crypto, macro, regulatory, and market structure data. Use overview endpoints for synthesis and source endpoints for targeted checks. Authenticate with Bearer token in GPT action settings."
+    "description": "Expanded Custom GPT action schema for real-time crypto, macro, regulatory, and market structure data. Use overview endpoints for synthesis and source endpoints for targeted checks. No API token is currently required."
   },
   "servers": [
     {
@@ -42,12 +42,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/macro/overview": {
@@ -80,12 +75,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/regulatory/overview": {
@@ -118,12 +108,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/binance/market": {
@@ -156,12 +141,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/binance/derivatives-structure": {
@@ -216,19 +196,14 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/binance/multi-timeframe-structure": {
       "get": {
         "operationId": "getBinanceMultiTimeframeStructure",
         "summary": "Get Binance multi-timeframe structure",
-        "description": "Returns Binance multi-timeframe structure for 15m, 1h, 4h, and 8h, including derived range levels, ATR-like volatility context, VWAP approximation, and raw candles for GPT to estimate 4h or 8h high-low zones.",
+        "description": "Returns Binance structure for 15m, 1h, 4h, 8h, 1d, 1w, and 1M, including range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles for 8h execution and higher-timeframe filtering.",
         "parameters": [
           {
             "name": "symbol",
@@ -254,12 +229,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/bybit/market-structure": {
@@ -292,12 +262,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/coingecko/simple-price": {
@@ -340,12 +305,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/fear-greed/latest": {
@@ -367,12 +327,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/mempool/fees": {
@@ -394,12 +349,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/treasury/latest-avg-rates": {
@@ -421,12 +371,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/bls/series/{series_id}": {
@@ -470,12 +415,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/fred/series/{series_id}": {
@@ -519,12 +459,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/bea/datasets": {
@@ -546,12 +481,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/bea/gdp": {
@@ -584,12 +514,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/fed/monetary-feed": {
@@ -624,12 +549,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/sec/company-tickers": {
@@ -682,12 +602,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/sec/submissions/{entity}": {
@@ -731,12 +646,7 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     },
     "/v1/sources/cftc/bitcoin-cot": {
@@ -781,23 +691,11 @@
               }
             }
           }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
+        }
       }
     }
   },
   "components": {
-    "schemas": {},
-    "securitySchemes": {
-      "bearerAuth": {
-        "type": "http",
-        "scheme": "bearer",
-        "bearerFormat": "API token"
-      }
-    }
+    "schemas": {}
   }
 }
