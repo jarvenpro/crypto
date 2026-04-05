@@ -73,7 +73,7 @@ def build_schema(base_url: str) -> dict:
         "openapi": "3.1.0",
         "info": {
             "title": "Crypto GPT Aggregator API",
-            "version": "1.1.0",
+            "version": "1.2.0",
             "description": (
                 "Expanded Custom GPT action schema for real-time crypto, macro, regulatory, and market structure data. "
                 "Use overview endpoints for synthesis and source endpoints for targeted checks. "
@@ -90,7 +90,7 @@ def build_schema(base_url: str) -> dict:
             "/v1/crypto/overview": {
                 "get": op(
                     "Get a real-time crypto market overview",
-                    "Best default endpoint for crypto direction judgment. Returns a compact snapshot including Binance market data, Fear and Greed index, mempool fees for BTC, and CoinGecko price context.",
+                    "Best default endpoint for crypto direction judgment. Returns a compact snapshot including Binance market data, Binance multi-timeframe structure, Binance derivatives structure, Bybit validation structure, Fear and Greed index, mempool fees for BTC, and CoinGecko price context.",
                     "getCryptoOverview",
                     [
                         qparam("symbol", "Trading symbol, usually BTCUSDT.", default="BTCUSDT"),
@@ -127,6 +127,38 @@ def build_schema(base_url: str) -> dict:
                     ],
                 )
             },
+            "/v1/sources/binance/derivatives-structure": {
+                "get": op(
+                    "Get Binance derivatives structure",
+                    "Returns Binance derivatives structure for 8h to 12h directional judgment, including mark-index spread, basis, open interest history, top trader long-short ratios, global long-short ratio, and taker buy-sell volume.",
+                    "getBinanceDerivativesStructure",
+                    [
+                        qparam("symbol", "Trading symbol such as BTCUSDT.", default="BTCUSDT"),
+                        qparam("period", "History period such as 15m, 30m, 1h, 2h, 4h, or 6h.", default="1h"),
+                        qparam("limit", "Number of historical points to return.", default=12, schema_type="integer", minimum=3, maximum=30),
+                    ],
+                )
+            },
+            "/v1/sources/binance/multi-timeframe-structure": {
+                "get": op(
+                    "Get Binance multi-timeframe structure",
+                    "Returns Binance multi-timeframe structure for 15m, 1h, 4h, and 8h, including derived range levels, ATR-like volatility context, VWAP approximation, and raw candles for GPT to estimate 4h or 8h high-low zones.",
+                    "getBinanceMultiTimeframeStructure",
+                    [
+                        qparam("symbol", "Trading symbol such as BTCUSDT.", default="BTCUSDT"),
+                    ],
+                )
+            },
+            "/v1/sources/bybit/market-structure": {
+                "get": op(
+                    "Get Bybit derivatives validation snapshot",
+                    "Returns Bybit public derivatives structure as a secondary validation source, including ticker context, 1h and 4h price structure, open interest history, funding history, and long-short ratio history.",
+                    "getBybitMarketStructure",
+                    [
+                        qparam("symbol", "Linear perpetual symbol such as BTCUSDT.", default="BTCUSDT"),
+                    ],
+                )
+            },
             "/v1/sources/coingecko/simple-price": {
                 "get": op(
                     "Get CoinGecko simple price data",
@@ -135,18 +167,6 @@ def build_schema(base_url: str) -> dict:
                     [
                         qparam("asset_id", "CoinGecko asset ID, such as bitcoin.", default="bitcoin"),
                         qparam("vs_currency", "Quote currency such as usd.", default="usd"),
-                    ],
-                )
-            },
-            "/v1/sources/coinglass/market-structure": {
-                "get": op(
-                    "Get CoinGlass derivatives structure snapshot",
-                    "Returns CoinGlass derivatives structure data focused on a chosen exchange and symbol, including open interest, funding, OI-weighted funding, long-short ratio, liquidation structure, and exchange rank context.",
-                    "getCoinGlassMarketStructure",
-                    [
-                        qparam("symbol", "Trading symbol such as BTCUSDT. The server normalizes this to the coin symbol used by CoinGlass.", default="BTCUSDT"),
-                        qparam("exchange", "Exchange to focus on, such as OKX or Binance.", default="OKX"),
-                        qparam("interval", "Candle interval such as 1h or 4h.", default="1h"),
                     ],
                 )
             },
