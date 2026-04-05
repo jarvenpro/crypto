@@ -172,6 +172,8 @@ powershell -ExecutionPolicy Bypass -File scripts\install_scheduled_task.ps1
   情绪指数
 - `CoinGecko`
   免费 Demo / Pro 价格接口
+- `CoinGlass`
+  衍生品结构数据，需要你自己的 API Key
 
 ### 运行方式
 
@@ -225,6 +227,7 @@ X-API-Key
 - `GET /v1/regulatory/overview`
 - `GET /v1/sources/binance/market`
 - `GET /v1/sources/coingecko/simple-price`
+- `GET /v1/sources/coinglass/market-structure`
 - `GET /v1/sources/fear-greed/latest`
 - `GET /v1/sources/mempool/fees`
 - `GET /v1/sources/treasury/latest-avg-rates`
