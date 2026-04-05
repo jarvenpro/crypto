@@ -22,3 +22,5 @@ services:
         sync: false
       - key: COINGECKO_PRO_API_KEY
         sync: false
+      - key: COINGLASS_API_KEY
+        sync: false
