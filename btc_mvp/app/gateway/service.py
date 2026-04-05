@@ -21,6 +21,7 @@ FED_MONETARY_FEED = "https://www.federalreserve.gov/feeds/press_monetary.xml"
 MEMPOOL_FEES_URL = "https://mempool.space/api/v1/fees/recommended"
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
+COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 
 COINGECKO_IDS = {
     "BTC": "bitcoin",
@@ -51,6 +52,7 @@ class GatewayService:
                 "bls": self._config.bls_enabled,
                 "bea": self._config.bea_enabled,
                 "coingecko_key": self._config.coingecko_auth_enabled,
+                "coinglass": self._config.coinglass_enabled,
                 "sec": True,
                 "cftc": True,
                 "fed_rss": True,
@@ -70,6 +72,7 @@ class GatewayService:
             "symbol": symbol,
             "sources": {
                 "binance": self._capture(lambda: self.get_binance_market(symbol)),
+                "coinglass": self._capture(lambda: self.get_coinglass_market_structure(symbol=symbol, exchange="OKX", interval="1h")),
                 "fear_greed": self._capture(self.get_fear_greed_latest),
                 "mempool": self._capture(self.get_mempool_recommended_fees) if root_symbol == "BTC" else self._skipped("Mempool data is only mapped for BTC."),
             },
@@ -195,6 +198,67 @@ class GatewayService:
             "asset_id": asset_id,
             "vs_currency": vs_currency,
             "metrics": payload[asset_id],
+        }
+
+    def get_coinglass_market_structure(self, symbol: str = "BTCUSDT", exchange: str = "OKX", interval: str = "1h") -> dict[str, Any]:
+        if not self._config.coinglass_api_key:
+            raise UpstreamServiceError("coinglass", "COINGLASS_API_KEY is not configured.", status_code=424)
+
+        normalized_symbol = self._normalize_coinglass_symbol(symbol)
+        normalized_exchange = exchange.upper()
+        params = {
+            "symbol": normalized_symbol,
+            "exchange": normalized_exchange,
+            "interval": interval,
+        }
+
+        open_interest = self._coinglass_get_data(
+            "/api/futures/open-interest/history",
+            params=params,
+        )
+        funding = self._coinglass_get_data(
+            "/api/futures/funding-rate/history",
+            params=params,
+        )
+        oi_weighted_funding = self._coinglass_get_data(
+            "/api/futures/oi-weight-funding-rate/history",
+            params={
+                "symbol": normalized_symbol,
+                "interval": interval,
+            },
+        )
+        long_short_ratio = self._coinglass_get_data(
+            "/api/futures/global-long-short-account-ratio/history",
+            params=params,
+        )
+        liquidation = self._coinglass_get_data(
+            "/api/futures/liquidation/history",
+            params=params,
+        )
+        exchange_rank = self._coinglass_get_data(
+            "/api/exchange/rank",
+            params=None,
+        )
+
+        return {
+            "symbol": normalized_symbol,
+            "exchange": normalized_exchange,
+            "interval": interval,
+            "summary": {
+                "open_interest": self._build_ohlc_summary(open_interest, value_key_candidates=("close", "value", "openInterest")),
+                "funding_rate": self._build_ohlc_summary(funding, value_key_candidates=("close", "value", "fundingRate")),
+                "oi_weighted_funding_rate": self._build_ohlc_summary(oi_weighted_funding, value_key_candidates=("close", "value", "fundingRate")),
+                "long_short_ratio": self._build_ohlc_summary(long_short_ratio, value_key_candidates=("close", "value", "longShortRadio", "longShortRatio")),
+                "liquidation": self._build_liquidation_summary(liquidation),
+                "exchange_rank": self._build_exchange_rank_summary(exchange_rank, normalized_exchange),
+            },
+            "raw": {
+                "open_interest_history": self._truncate_rows(open_interest),
+                "funding_rate_history": self._truncate_rows(funding),
+                "oi_weighted_funding_rate_history": self._truncate_rows(oi_weighted_funding),
+                "long_short_ratio_history": self._truncate_rows(long_short_ratio),
+                "liquidation_history": self._truncate_rows(liquidation),
+            },
         }
 
     def get_fear_greed_latest(self) -> dict[str, Any]:
@@ -508,6 +572,28 @@ class GatewayService:
             ],
         }
 
+    def _coinglass_get_data(self, path: str, params: dict[str, Any] | None) -> Any:
+        payload = self._http.get_json(
+            "coinglass",
+            f"{COINGLASS_BASE}{path}",
+            params=params,
+            headers={"CG-API-KEY": self._config.coinglass_api_key},
+            ttl_seconds=30,
+        )
+
+        if not isinstance(payload, dict):
+            raise UpstreamServiceError("coinglass", f"CoinGlass returned an unexpected payload: {payload}")
+
+        success = payload.get("success")
+        if success is False:
+            message = payload.get("msg") or payload.get("message") or "CoinGlass returned success=false."
+            raise UpstreamServiceError("coinglass", f"CoinGlass error: {message}")
+
+        data = payload.get("data")
+        if data is None:
+            raise UpstreamServiceError("coinglass", f"CoinGlass returned no data for {path}.")
+        return data
+
     def _capture(self, func) -> dict[str, Any]:
         try:
             return {"ok": True, "data": func()}
@@ -567,6 +653,142 @@ class GatewayService:
         if value in (None, "", "-"):
             return None
         return int(float(value))
+
+    @staticmethod
+    def _normalize_coinglass_symbol(symbol: str) -> str:
+        cleaned = symbol.strip().upper().replace("-", "")
+        for suffix in ("USDT", "USD", "USDC", "BUSD"):
+            if cleaned.endswith(suffix):
+                return cleaned[: -len(suffix)]
+        return cleaned
+
+    def _build_ohlc_summary(self, rows: Any, value_key_candidates: tuple[str, ...]) -> dict[str, Any] | None:
+        normalized_rows = self._normalize_rows(rows)
+        if len(normalized_rows) < 1:
+            return None
+
+        latest = normalized_rows[-1]
+        previous = normalized_rows[-2] if len(normalized_rows) > 1 else None
+        latest_value = self._extract_first_numeric(latest, value_key_candidates)
+        previous_value = self._extract_first_numeric(previous, value_key_candidates) if previous else None
+
+        return {
+            "latest_time": self._extract_time(latest),
+            "latest_value": latest_value,
+            "previous_value": previous_value,
+            "change_pct": self._compute_change_pct(previous_value, latest_value),
+            "trend": self._classify_trend(previous_value, latest_value),
+        }
+
+    def _build_liquidation_summary(self, rows: Any) -> dict[str, Any] | None:
+        normalized_rows = self._normalize_rows(rows)
+        if not normalized_rows:
+            return None
+
+        recent_rows = normalized_rows[-3:]
+        long_candidates = ("longLiquidationUsd", "longUsd", "longsUsd", "buy", "long")
+        short_candidates = ("shortLiquidationUsd", "shortUsd", "shortsUsd", "sell", "short")
+
+        long_total = 0.0
+        short_total = 0.0
+        for row in recent_rows:
+            long_total += self._extract_first_numeric(row, long_candidates) or 0.0
+            short_total += self._extract_first_numeric(row, short_candidates) or 0.0
+
+        imbalance = short_total - long_total
+        if abs(imbalance) < max(long_total, short_total, 1.0) * 0.05:
+            bias = "balanced"
+        elif imbalance > 0:
+            bias = "shorts_dominant_liquidation"
+        else:
+            bias = "longs_dominant_liquidation"
+
+        return {
+            "recent_window_points": len(recent_rows),
+            "long_liquidation_usd": round(long_total, 2),
+            "short_liquidation_usd": round(short_total, 2),
+            "imbalance_usd": round(imbalance, 2),
+            "bias": bias,
+        }
+
+    def _build_exchange_rank_summary(self, rows: Any, exchange: str) -> dict[str, Any] | None:
+        normalized_rows = self._normalize_rows(rows)
+        if not normalized_rows:
+            return None
+
+        target = None
+        for row in normalized_rows:
+            row_exchange = str(row.get("exchangeName") or row.get("exchange") or row.get("name") or "").upper()
+            if row_exchange == exchange.upper():
+                target = row
+                break
+
+        top_rows = sorted(
+            normalized_rows,
+            key=lambda row: self._extract_first_numeric(row, ("openInterestUsd", "open_interest_usd", "openInterest")) or 0.0,
+            reverse=True,
+        )[:5]
+
+        return {
+            "focus_exchange": exchange,
+            "focus_exchange_metrics": target,
+            "top_open_interest_exchanges": top_rows,
+        }
+
+    @staticmethod
+    def _normalize_rows(rows: Any) -> list[dict[str, Any]]:
+        if isinstance(rows, list):
+            return [item for item in rows if isinstance(item, dict)]
+        if isinstance(rows, dict):
+            for key in ("list", "data", "items", "history"):
+                value = rows.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _truncate_rows(rows: Any, limit: int = 6) -> list[dict[str, Any]]:
+        normalized_rows = GatewayService._normalize_rows(rows)
+        return normalized_rows[-limit:]
+
+    @staticmethod
+    def _extract_first_numeric(row: dict[str, Any] | None, keys: tuple[str, ...]) -> float | None:
+        if row is None:
+            return None
+        lowered = {str(key).lower(): value for key, value in row.items()}
+        for key in keys:
+            if key.lower() in lowered:
+                value = lowered[key.lower()]
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    @staticmethod
+    def _extract_time(row: dict[str, Any] | None) -> Any:
+        if row is None:
+            return None
+        for key in ("time", "t", "timestamp", "date"):
+            if key in row:
+                return row[key]
+        return None
+
+    @staticmethod
+    def _compute_change_pct(previous_value: float | None, latest_value: float | None) -> float | None:
+        if previous_value in (None, 0) or latest_value is None:
+            return None
+        return round(((latest_value - previous_value) / abs(previous_value)) * 100, 4)
+
+    @staticmethod
+    def _classify_trend(previous_value: float | None, latest_value: float | None) -> str | None:
+        if previous_value is None or latest_value is None:
+            return None
+        if latest_value > previous_value:
+            return "up"
+        if latest_value < previous_value:
+            return "down"
+        return "flat"
 
     @staticmethod
     def _zip_fields(fields: list[str], row: list[Any]) -> dict[str, Any]:

@@ -171,6 +171,16 @@ def coingecko_simple_price(
     return service.get_coingecko_simple_price(asset_id=asset_id, vs_currency=vs_currency)
 
 
+@protected.get("/v1/sources/coinglass/market-structure", tags=["Sources"], summary="Get CoinGlass derivatives structure snapshot")
+def coinglass_market_structure(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT. The server normalizes this to the coin symbol used by CoinGlass."),
+    exchange: str = Query("OKX", description="Exchange to focus on, such as OKX or Binance."),
+    interval: str = Query("1h", description="Candle interval, such as 1h or 4h."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_coinglass_market_structure(symbol=symbol, exchange=exchange, interval=interval)
+
+
 @protected.get("/v1/sources/fear-greed/latest", tags=["Sources"], summary="Get latest Fear & Greed index")
 def fear_greed_latest(service: GatewayService = Depends(get_gateway_service)) -> dict:
     return service.get_fear_greed_latest()
