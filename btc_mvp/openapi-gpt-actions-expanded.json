@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Crypto GPT Aggregator API",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Expanded Custom GPT action schema for real-time crypto, macro, regulatory, and market structure data. Use overview endpoints for synthesis and source endpoints for targeted checks. Authenticate with Bearer token in GPT action settings."
   },
   "servers": [
@@ -16,7 +16,7 @@
       "get": {
         "operationId": "getCryptoOverview",
         "summary": "Get a real-time crypto market overview",
-        "description": "Best default endpoint for crypto direction judgment. Returns a compact snapshot including Binance market data, Fear and Greed index, mempool fees for BTC, and CoinGecko price context.",
+        "description": "Best default endpoint for crypto direction judgment. Returns a compact snapshot including Binance market data, Binance multi-timeframe structure, Binance derivatives structure, Bybit validation structure, Fear and Greed index, mempool fees for BTC, and CoinGecko price context.",
         "parameters": [
           {
             "name": "symbol",
@@ -164,6 +164,142 @@
         ]
       }
     },
+    "/v1/sources/binance/derivatives-structure": {
+      "get": {
+        "operationId": "getBinanceDerivativesStructure",
+        "summary": "Get Binance derivatives structure",
+        "description": "Returns Binance derivatives structure for 8h to 12h directional judgment, including mark-index spread, basis, open interest history, top trader long-short ratios, global long-short ratio, and taker buy-sell volume.",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "BTCUSDT"
+            },
+            "description": "Trading symbol such as BTCUSDT."
+          },
+          {
+            "name": "period",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "1h"
+            },
+            "description": "History period such as 15m, 30m, 1h, 2h, 4h, or 6h."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 12,
+              "minimum": 3,
+              "maximum": 30
+            },
+            "description": "Number of historical points to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/sources/binance/multi-timeframe-structure": {
+      "get": {
+        "operationId": "getBinanceMultiTimeframeStructure",
+        "summary": "Get Binance multi-timeframe structure",
+        "description": "Returns Binance multi-timeframe structure for 15m, 1h, 4h, and 8h, including derived range levels, ATR-like volatility context, VWAP approximation, and raw candles for GPT to estimate 4h or 8h high-low zones.",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "BTCUSDT"
+            },
+            "description": "Trading symbol such as BTCUSDT."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/sources/bybit/market-structure": {
+      "get": {
+        "operationId": "getBybitMarketStructure",
+        "summary": "Get Bybit derivatives validation snapshot",
+        "description": "Returns Bybit public derivatives structure as a secondary validation source, including ticker context, 1h and 4h price structure, open interest history, funding history, and long-short ratio history.",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "BTCUSDT"
+            },
+            "description": "Linear perpetual symbol such as BTCUSDT."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {},
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/sources/coingecko/simple-price": {
       "get": {
         "operationId": "getCoinGeckoSimplePrice",
@@ -189,64 +325,6 @@
               "default": "usd"
             },
             "description": "Quote currency such as usd."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {},
-                  "additionalProperties": true
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/sources/coinglass/market-structure": {
-      "get": {
-        "operationId": "getCoinGlassMarketStructure",
-        "summary": "Get CoinGlass derivatives structure snapshot",
-        "description": "Returns CoinGlass derivatives structure data focused on a chosen exchange and symbol, including open interest, funding, OI-weighted funding, long-short ratio, liquidation structure, and exchange rank context.",
-        "parameters": [
-          {
-            "name": "symbol",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "BTCUSDT"
-            },
-            "description": "Trading symbol such as BTCUSDT. The server normalizes this to the coin symbol used by CoinGlass."
-          },
-          {
-            "name": "exchange",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "OKX"
-            },
-            "description": "Exchange to focus on, such as OKX or Binance."
-          },
-          {
-            "name": "interval",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "1h"
-            },
-            "description": "Candle interval such as 1h or 4h."
           }
         ],
         "responses": {
