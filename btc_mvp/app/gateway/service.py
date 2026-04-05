@@ -204,36 +204,38 @@ class GatewayService:
         if not self._config.coinglass_api_key:
             raise UpstreamServiceError("coinglass", "COINGLASS_API_KEY is not configured.", status_code=424)
 
-        normalized_symbol = self._normalize_coinglass_symbol(symbol)
+        normalized_pair_symbol = self._normalize_coinglass_pair_symbol(symbol)
+        normalized_asset_symbol = self._extract_root_asset(symbol)
         normalized_exchange = exchange.upper()
-        params = {
-            "symbol": normalized_symbol,
+        pair_params = {
+            "symbol": normalized_pair_symbol,
             "exchange": normalized_exchange,
             "interval": interval,
         }
 
         open_interest = self._coinglass_get_data(
             "/api/futures/open-interest/history",
-            params=params,
+            params=pair_params,
         )
         funding = self._coinglass_get_data(
             "/api/futures/funding-rate/history",
-            params=params,
+            params=pair_params,
         )
         oi_weighted_funding = self._coinglass_get_data(
             "/api/futures/oi-weight-funding-rate/history",
             params={
-                "symbol": normalized_symbol,
+                "symbol": normalized_pair_symbol,
+                "exchange": normalized_exchange,
                 "interval": interval,
             },
         )
         long_short_ratio = self._coinglass_get_data(
             "/api/futures/global-long-short-account-ratio/history",
-            params=params,
+            params=pair_params,
         )
         liquidation = self._coinglass_get_data(
             "/api/futures/liquidation/history",
-            params=params,
+            params=pair_params,
         )
         exchange_rank = self._coinglass_get_data(
             "/api/exchange/rank",
@@ -241,7 +243,8 @@ class GatewayService:
         )
 
         return {
-            "symbol": normalized_symbol,
+            "symbol": normalized_pair_symbol,
+            "asset_symbol": normalized_asset_symbol,
             "exchange": normalized_exchange,
             "interval": interval,
             "summary": {
@@ -655,12 +658,8 @@ class GatewayService:
         return int(float(value))
 
     @staticmethod
-    def _normalize_coinglass_symbol(symbol: str) -> str:
-        cleaned = symbol.strip().upper().replace("-", "")
-        for suffix in ("USDT", "USD", "USDC", "BUSD"):
-            if cleaned.endswith(suffix):
-                return cleaned[: -len(suffix)]
-        return cleaned
+    def _normalize_coinglass_pair_symbol(symbol: str) -> str:
+        return symbol.strip().upper().replace("-", "").replace("_", "").replace("/", "")
 
     def _build_ohlc_summary(self, rows: Any, value_key_candidates: tuple[str, ...]) -> dict[str, Any] | None:
         normalized_rows = self._normalize_rows(rows)
