@@ -207,44 +207,47 @@ class GatewayService:
         normalized_pair_symbol = self._normalize_coinglass_pair_symbol(symbol)
         normalized_asset_symbol = self._extract_root_asset(symbol)
         normalized_exchange = exchange.upper()
-        pair_params = {
-            "symbol": normalized_pair_symbol,
-            "exchange": normalized_exchange,
-            "interval": interval,
-        }
+        resolved_pair_symbol = self._resolve_coinglass_supported_pair(exchange=normalized_exchange, symbol=normalized_pair_symbol)
+        symbol_candidates = self._unique_strings(
+            [
+                resolved_pair_symbol,
+                normalized_pair_symbol,
+                normalized_asset_symbol,
+            ]
+        )
 
-        open_interest = self._coinglass_get_data(
-            "/api/futures/open-interest/history",
-            params=pair_params,
+        open_interest = self._get_coinglass_open_interest(
+            symbol_candidates=symbol_candidates,
+            asset_symbol=normalized_asset_symbol,
+            exchange=normalized_exchange,
+            interval=interval,
         )
-        funding = self._coinglass_get_data(
+        funding = self._coinglass_get_first_available_data(
             "/api/futures/funding-rate/history",
-            params=pair_params,
+            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
         )
-        oi_weighted_funding = self._coinglass_get_data(
-            "/api/futures/oi-weight-funding-rate/history",
-            params={
-                "symbol": normalized_pair_symbol,
-                "exchange": normalized_exchange,
-                "interval": interval,
-            },
+        oi_weighted_funding = self._coinglass_get_first_available_data(
+            "/api/futures/funding-rate/oi-weight-history",
+            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
         )
-        long_short_ratio = self._coinglass_get_data(
+        long_short_ratio = self._coinglass_get_first_available_data(
             "/api/futures/global-long-short-account-ratio/history",
-            params=pair_params,
+            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
         )
-        liquidation = self._coinglass_get_data(
+        liquidation = self._coinglass_get_first_available_data(
             "/api/futures/liquidation/history",
-            params=pair_params,
+            self._build_coinglass_param_variants(symbol_candidates, normalized_exchange, interval),
         )
         exchange_rank = self._coinglass_get_data(
-            "/api/exchange/rank",
+            "/api/futures/exchange-rank",
             params=None,
         )
 
         return {
-            "symbol": normalized_pair_symbol,
+            "symbol": resolved_pair_symbol,
+            "requested_symbol": normalized_pair_symbol,
             "asset_symbol": normalized_asset_symbol,
+            "symbol_candidates": symbol_candidates,
             "exchange": normalized_exchange,
             "interval": interval,
             "summary": {
@@ -597,6 +600,123 @@ class GatewayService:
             raise UpstreamServiceError("coinglass", f"CoinGlass returned no data for {path}.")
         return data
 
+    def _coinglass_get_first_available_data(self, path: str, param_variants: list[dict[str, Any]]) -> Any:
+        attempts: list[str] = []
+        last_error: UpstreamServiceError | None = None
+
+        for params in param_variants:
+            try:
+                return self._coinglass_get_data(path, params=params)
+            except UpstreamServiceError as exc:
+                last_error = exc
+                symbol = params.get("symbol")
+                attempts.append(str(symbol))
+                if exc.source != "coinglass":
+                    raise
+                if "returned no data" in exc.detail:
+                    continue
+                raise UpstreamServiceError(
+                    "coinglass",
+                    f"{exc.detail} Path: {path}. Params: {params}",
+                    status_code=exc.status_code,
+                ) from exc
+
+        attempted_symbols = ", ".join(self._unique_strings(attempts)) or "none"
+        detail = f"CoinGlass returned no data for {path}. Tried symbols: {attempted_symbols}."
+        raise UpstreamServiceError(
+            "coinglass",
+            detail,
+            status_code=last_error.status_code if last_error else 502,
+        )
+
+    def _get_coinglass_open_interest(
+        self,
+        *,
+        symbol_candidates: list[str],
+        asset_symbol: str,
+        exchange: str,
+        interval: str,
+    ) -> Any:
+        try:
+            return self._coinglass_get_first_available_data(
+                "/api/futures/open-interest/history",
+                self._build_coinglass_param_variants(symbol_candidates, exchange, interval),
+            )
+        except UpstreamServiceError as exc:
+            primary_error = exc
+
+        exchange_history = self._coinglass_get_data(
+            "/api/futures/open-interest/exchange-history-chart",
+            params={
+                "symbol": asset_symbol,
+                "interval": interval,
+            },
+        )
+        exchange_rows = self._extract_exchange_history_rows(exchange_history, exchange)
+        if exchange_rows:
+            return exchange_rows
+
+        raise primary_error
+
+    @staticmethod
+    def _build_coinglass_param_variants(symbol_candidates: list[str], exchange: str, interval: str) -> list[dict[str, Any]]:
+        variants: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for symbol in symbol_candidates:
+            key = (symbol, exchange, interval)
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append(
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "interval": interval,
+                }
+            )
+        return variants
+
+    def _resolve_coinglass_supported_pair(self, exchange: str, symbol: str) -> str:
+        try:
+            data = self._coinglass_get_data(
+                "/api/futures/supported-exchange-pairs",
+                params=None,
+            )
+        except Exception:
+            return symbol
+
+        pairs = self._extract_supported_pairs_for_exchange(data, exchange)
+        if not pairs:
+            return symbol
+
+        normalized_target = self._normalize_coinglass_pair_symbol(symbol)
+        exact_match = next((pair for pair in pairs if self._normalize_coinglass_pair_symbol(pair) == normalized_target), None)
+        if exact_match:
+            return exact_match
+
+        substring_match = next(
+            (
+                pair
+                for pair in pairs
+                if normalized_target in self._normalize_coinglass_pair_symbol(pair)
+                or self._normalize_coinglass_pair_symbol(pair) in normalized_target
+            ),
+            None,
+        )
+        if substring_match:
+            return substring_match
+
+        root_asset = self._extract_root_asset(symbol)
+        root_match = next(
+            (
+                pair
+                for pair in pairs
+                if self._normalize_coinglass_pair_symbol(pair).startswith(root_asset)
+            ),
+            None,
+        )
+        return root_match or symbol
+
     def _capture(self, func) -> dict[str, Any]:
         try:
             return {"ok": True, "data": func()}
@@ -749,6 +869,108 @@ class GatewayService:
     def _truncate_rows(rows: Any, limit: int = 6) -> list[dict[str, Any]]:
         normalized_rows = GatewayService._normalize_rows(rows)
         return normalized_rows[-limit:]
+
+    def _extract_supported_pairs_for_exchange(self, data: Any, exchange: str) -> list[str]:
+        target_exchange = exchange.upper()
+
+        def normalize_exchange_name(value: Any) -> str:
+            return str(value or "").upper()
+
+        def extract_pair_strings(value: Any) -> list[str]:
+            results: list[str] = []
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        results.append(item)
+                    elif isinstance(item, dict):
+                        for key in ("symbol", "pair", "instrument", "name"):
+                            if key in item and isinstance(item[key], str):
+                                results.append(item[key])
+                                break
+            return results
+
+        if isinstance(data, dict):
+            direct = data.get(exchange) or data.get(target_exchange) or data.get(exchange.lower())
+            direct_pairs = extract_pair_strings(direct)
+            if direct_pairs:
+                return direct_pairs
+
+            for key, value in data.items():
+                if normalize_exchange_name(key) == target_exchange:
+                    key_pairs = extract_pair_strings(value)
+                    if key_pairs:
+                        return key_pairs
+
+            for value in data.values():
+                if isinstance(value, dict):
+                    exchange_name = normalize_exchange_name(
+                        value.get("exchange") or value.get("exchangeName") or value.get("name")
+                    )
+                    if exchange_name == target_exchange:
+                        for key in ("pairs", "symbols", "instruments", "markets", "list", "data"):
+                            if key in value:
+                                nested_pairs = extract_pair_strings(value[key])
+                                if nested_pairs:
+                                    return nested_pairs
+
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                exchange_name = normalize_exchange_name(
+                    item.get("exchange") or item.get("exchangeName") or item.get("name")
+                )
+                if exchange_name != target_exchange:
+                    continue
+                for key in ("pairs", "symbols", "instruments", "markets", "list", "data"):
+                    if key in item:
+                        pairs = extract_pair_strings(item[key])
+                        if pairs:
+                            return pairs
+
+        return []
+
+    @staticmethod
+    def _extract_exchange_history_rows(data: Any, exchange: str) -> list[dict[str, Any]]:
+        if not isinstance(data, dict):
+            return []
+
+        time_list = data.get("timeList")
+        data_map = data.get("dataMap")
+        if not isinstance(time_list, list) or not isinstance(data_map, dict):
+            return []
+
+        series = data_map.get(exchange) or data_map.get(exchange.upper()) or data_map.get(exchange.title())
+        if not isinstance(series, list):
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for timestamp, value in zip(time_list, series):
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                continue
+            rows.append(
+                {
+                    "time": timestamp,
+                    "value": numeric_value,
+                    "close": numeric_value,
+                    "openInterest": numeric_value,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _unique_strings(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        items: list[str] = []
+        for value in values:
+            normalized = str(value).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            items.append(normalized)
+        return items
 
     @staticmethod
     def _extract_first_numeric(row: dict[str, Any] | None, keys: tuple[str, ...]) -> float | None:
