@@ -92,7 +92,7 @@ def build_schema(base_url: str, auth_enabled: bool) -> dict:
             "/v1/crypto/overview": {
                 "get": op(
                     "Get a real-time crypto market overview",
-                    "Best default endpoint for crypto direction judgment. Returns a compact snapshot including Binance market data, Binance multi-timeframe structure, Binance derivatives structure, Bybit validation structure, Fear and Greed index, mempool fees for BTC, and CoinGecko price context.",
+                    "Quick triage endpoint for BTC direction. Use it first for a compact market snapshot, but for any final 8-12h judgment also call Binance multi-timeframe structure and Binance derivatives structure.",
                     "getCryptoOverview",
                     [
                         qparam("symbol", "Trading symbol, usually BTCUSDT.", default="BTCUSDT"),
@@ -136,7 +136,7 @@ def build_schema(base_url: str, auth_enabled: bool) -> dict:
             "/v1/sources/binance/derivatives-structure": {
                 "get": op(
                     "Get Binance derivatives structure",
-                    "Returns Binance derivatives structure for 8h to 12h directional judgment, including mark-index spread, basis, open interest history, top trader long-short ratios, global long-short ratio, and taker buy-sell volume.",
+                    "Required depth endpoint for final 8-12h BTC judgment. Returns mark-index spread, basis, open interest history, top trader ratios, global long-short ratio, and taker buy-sell volume.",
                     "getBinanceDerivativesStructure",
                     [
                         qparam("symbol", "Trading symbol such as BTCUSDT.", default="BTCUSDT"),
@@ -149,7 +149,7 @@ def build_schema(base_url: str, auth_enabled: bool) -> dict:
             "/v1/sources/binance/multi-timeframe-structure": {
                 "get": op(
                     "Get Binance multi-timeframe structure",
-                    "Returns Binance structure for 15m, 1h, 4h, 8h, 1d, 1w, and 1M, including range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles for 8h execution and higher-timeframe filtering.",
+                    "Required depth endpoint for final 8-12h BTC judgment. Returns 15m, 1h, 4h, 8h, 1d, 1w, and 1M structure with range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles.",
                     "getBinanceMultiTimeframeStructure",
                     [
                         qparam("symbol", "Trading symbol such as BTCUSDT.", default="BTCUSDT"),
