@@ -7,7 +7,7 @@
   },
   "servers": [
     {
-      "url": "https://crypto-o8fu.onrender.com",
+      "url": "https://your-public-domain.example.com",
       "description": "Public HTTPS base URL for the deployed aggregator API."
     }
   ],
@@ -16,7 +16,7 @@
       "get": {
         "operationId": "getCryptoOverview",
         "summary": "Get a real-time crypto market overview",
-        "description": "Best default endpoint for crypto direction judgment. Returns a compact snapshot including Binance market data, Binance multi-timeframe structure, Binance derivatives structure, Bybit validation structure, Fear and Greed index, mempool fees for BTC, and CoinGecko price context.",
+        "description": "Quick triage endpoint for BTC direction. Use it first for a compact market snapshot, but for any final 8-12h judgment also call Binance multi-timeframe structure and Binance derivatives structure.",
         "parameters": [
           {
             "name": "symbol",
@@ -148,7 +148,7 @@
       "get": {
         "operationId": "getBinanceDerivativesStructure",
         "summary": "Get Binance derivatives structure",
-        "description": "Returns Binance derivatives structure for 8h to 12h directional judgment, including mark-index spread, basis, open interest history, top trader long-short ratios, global long-short ratio, and taker buy-sell volume.",
+        "description": "Required depth endpoint for final 8-12h BTC judgment. Returns mark-index spread, basis, open interest history, top trader ratios, global long-short ratio, and taker buy-sell volume.",
         "parameters": [
           {
             "name": "symbol",
@@ -203,7 +203,7 @@
       "get": {
         "operationId": "getBinanceMultiTimeframeStructure",
         "summary": "Get Binance multi-timeframe structure",
-        "description": "Returns Binance structure for 15m, 1h, 4h, 8h, 1d, 1w, and 1M, including range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles for 8h execution and higher-timeframe filtering.",
+        "description": "Required depth endpoint for final 8-12h BTC judgment. Returns 15m, 1h, 4h, 8h, 1d, 1w, and 1M structure with range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles.",
         "parameters": [
           {
             "name": "symbol",
