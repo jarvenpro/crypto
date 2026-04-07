@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Any
 from xml.etree import ElementTree
 
@@ -42,6 +43,7 @@ class GatewayService:
     def __init__(self, config: GatewayConfig, http_client: GatewayHttpClient) -> None:
         self._config = config
         self._http = http_client
+        self._memo_cache: dict[str, tuple[float, Any]] = {}
 
     def health(self) -> dict[str, Any]:
         return {
@@ -65,16 +67,24 @@ class GatewayService:
         }
 
     def crypto_overview(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        return self._memoize(f"crypto_overview:{symbol}", ttl_seconds=45, builder=lambda: self._build_crypto_overview(symbol))
+
+    def _build_crypto_overview(self, symbol: str) -> dict[str, Any]:
         root_symbol = self._extract_root_asset(symbol)
         coingecko_id = COINGECKO_IDS.get(root_symbol)
+        binance_market = self._capture(lambda: self.get_binance_market_overview(symbol))
+        spot_price = None
+        if binance_market.get("ok"):
+            spot_price = binance_market.get("data", {}).get("spot_price")
 
         payload = {
             "generated_at": utc_now_iso(),
             "symbol": symbol,
             "sources": {
-                "binance": self._capture(lambda: self.get_binance_market(symbol)),
-                "binance_structure": self._capture(lambda: self.get_binance_multi_timeframe_structure(symbol)),
-                "binance_derivatives": self._capture(lambda: self.get_binance_derivatives_structure(symbol)),
+                "binance": binance_market,
+                "binance_structure": self._capture(lambda: self.get_binance_multi_timeframe_overview(symbol, spot_price=spot_price)),
+                "binance_derivatives": self._capture(lambda: self.get_binance_derivatives_overview(symbol)),
                 "bybit": self._capture(lambda: self.get_bybit_market_structure(symbol)),
                 "fear_greed": self._capture(self.get_fear_greed_latest),
                 "mempool": self._capture(self.get_mempool_recommended_fees) if root_symbol == "BTC" else self._skipped("Mempool data is only mapped for BTC."),
@@ -87,6 +97,15 @@ class GatewayService:
             payload["sources"]["coingecko"] = self._skipped(f"No CoinGecko asset mapping configured for {root_symbol}.")
 
         return payload
+
+    def _memoize(self, key: str, ttl_seconds: int, builder) -> Any:
+        now = monotonic()
+        cached = self._memo_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+        value = builder()
+        self._memo_cache[key] = (now + ttl_seconds, value)
+        return value
 
     def macro_overview(self, fred_series_ids: list[str] | None = None) -> dict[str, Any]:
         series_ids = fred_series_ids or list(DEFAULT_FRED_SERIES)
@@ -113,47 +132,51 @@ class GatewayService:
 
     def get_binance_market(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
+        return self._memoize(f"binance_market:{symbol}", ttl_seconds=20, builder=lambda: self._build_binance_market(symbol))
+
+    def _build_binance_market(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
         price = self._http.get_json(
             "binance",
             f"{BINANCE_SPOT_BASE}/api/v3/ticker/price",
             params={"symbol": symbol},
-            ttl_seconds=10,
+            ttl_seconds=15,
         )
         book = self._http.get_json(
             "binance",
             f"{BINANCE_SPOT_BASE}/api/v3/ticker/bookTicker",
             params={"symbol": symbol},
-            ttl_seconds=10,
+            ttl_seconds=15,
         )
         open_interest = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/fapi/v1/openInterest",
             params={"symbol": symbol},
-            ttl_seconds=15,
+            ttl_seconds=30,
         )
         funding = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/fapi/v1/fundingRate",
             params={"symbol": symbol, "limit": 1},
-            ttl_seconds=15,
+            ttl_seconds=30,
         )
         taker_ratio = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/takerlongshortRatio",
             params={"symbol": symbol, "period": "5m", "limit": 1},
-            ttl_seconds=15,
+            ttl_seconds=30,
         )
         long_short_ratio = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/globalLongShortAccountRatio",
             params={"symbol": symbol, "period": "5m", "limit": 1},
-            ttl_seconds=15,
+            ttl_seconds=30,
         )
         candles = self._http.get_json(
             "binance",
             f"{BINANCE_SPOT_BASE}/api/v3/klines",
             params={"symbol": symbol, "interval": "5m", "limit": 3},
-            ttl_seconds=10,
+            ttl_seconds=15,
         )
 
         return {
@@ -172,7 +195,46 @@ class GatewayService:
             "recent_5m_candles": [self._normalize_binance_candle(item) for item in candles],
         }
 
+    def get_binance_market_overview(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        return self._memoize(f"binance_market_overview:{symbol}", ttl_seconds=20, builder=lambda: self._build_binance_market_overview(symbol))
+
+    def _build_binance_market_overview(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        price = self._http.get_json(
+            "binance",
+            f"{BINANCE_SPOT_BASE}/api/v3/ticker/price",
+            params={"symbol": symbol},
+            ttl_seconds=20,
+        )
+        ticker_24h = self._http.get_json(
+            "binance",
+            f"{BINANCE_SPOT_BASE}/api/v3/ticker/24hr",
+            params={"symbol": symbol},
+            ttl_seconds=30,
+        )
+        return {
+            "symbol": symbol,
+            "spot_price": self._safe_float(price.get("price")),
+            "ticker_24h": {
+                "price_change_pct": self._safe_float(ticker_24h.get("priceChangePercent")),
+                "high_price": self._safe_float(ticker_24h.get("highPrice")),
+                "low_price": self._safe_float(ticker_24h.get("lowPrice")),
+                "weighted_avg_price": self._safe_float(ticker_24h.get("weightedAvgPrice")),
+                "volume": self._safe_float(ticker_24h.get("volume")),
+                "quote_volume": self._safe_float(ticker_24h.get("quoteVolume")),
+            },
+        }
+
     def get_binance_multi_timeframe_structure(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        symbol = symbol.upper()
+        return self._memoize(
+            f"binance_multi_timeframe_structure:{symbol}",
+            ttl_seconds=60,
+            builder=lambda: self._build_binance_multi_timeframe_structure(symbol),
+        )
+
+    def _build_binance_multi_timeframe_structure(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         symbol = symbol.upper()
         interval_limits = {
             "15m": 32,
@@ -188,13 +250,13 @@ class GatewayService:
             "binance",
             f"{BINANCE_SPOT_BASE}/api/v3/ticker/24hr",
             params={"symbol": symbol},
-            ttl_seconds=15,
+            ttl_seconds=60,
         )
         current_price = self._http.get_json(
             "binance",
             f"{BINANCE_SPOT_BASE}/api/v3/ticker/price",
             params={"symbol": symbol},
-            ttl_seconds=10,
+            ttl_seconds=15,
         )
 
         timeframe_candles: dict[str, list[dict[str, Any]]] = {}
@@ -203,7 +265,7 @@ class GatewayService:
                 "binance",
                 f"{BINANCE_SPOT_BASE}/api/v3/klines",
                 params={"symbol": symbol, "interval": interval, "limit": limit},
-                ttl_seconds=20,
+                ttl_seconds=self._binance_kline_ttl(interval),
             )
             timeframe_candles[interval] = [self._normalize_binance_candle(item) for item in rows]
 
@@ -235,51 +297,115 @@ class GatewayService:
             "fibonacci_levels": fibonacci_levels,
         }
 
+    def get_binance_multi_timeframe_overview(self, symbol: str = "BTCUSDT", spot_price: float | None = None) -> dict[str, Any]:
+        symbol = symbol.upper()
+        overview_key = f"binance_multi_timeframe_overview:{symbol}:{spot_price if spot_price is not None else 'na'}"
+        return self._memoize(
+            overview_key,
+            ttl_seconds=60,
+            builder=lambda: self._build_binance_multi_timeframe_overview(symbol, spot_price=spot_price),
+        )
+
+    def _build_binance_multi_timeframe_overview(self, symbol: str = "BTCUSDT", spot_price: float | None = None) -> dict[str, Any]:
+        symbol = symbol.upper()
+        if spot_price is None:
+            current_price = self._http.get_json(
+                "binance",
+                f"{BINANCE_SPOT_BASE}/api/v3/ticker/price",
+                params={"symbol": symbol},
+                ttl_seconds=20,
+            )
+            spot_price = self._safe_float(current_price.get("price"))
+
+        interval_limits = {
+            "1h": 24,
+            "4h": 18,
+            "1d": 30,
+            "1w": 24,
+            "1M": 12,
+        }
+
+        timeframe_candles: dict[str, list[dict[str, Any]]] = {}
+        for interval, limit in interval_limits.items():
+            rows = self._http.get_json(
+                "binance",
+                f"{BINANCE_SPOT_BASE}/api/v3/klines",
+                params={"symbol": symbol, "interval": interval, "limit": limit},
+                ttl_seconds=self._binance_kline_ttl(interval),
+            )
+            timeframe_candles[interval] = [self._normalize_binance_candle(item) for item in rows]
+
+        derived_levels = self._build_multi_timeframe_levels(timeframe_candles)
+        support_resistance = self._build_support_resistance_levels(timeframe_candles, spot_price)
+        fibonacci_levels = self._build_multi_timeframe_fibonacci_levels(timeframe_candles)
+
+        return {
+            "symbol": symbol,
+            "spot_price": spot_price,
+            "timeframes": {
+                interval: {
+                    "summary": self._build_candle_structure_summary(candles),
+                }
+                for interval, candles in timeframe_candles.items()
+            },
+            "derived_levels": derived_levels,
+            "support_resistance": support_resistance,
+            "fibonacci_levels": fibonacci_levels,
+        }
+
     def get_binance_derivatives_structure(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 12) -> dict[str, Any]:
         symbol = symbol.upper()
         period = period.lower()
+        return self._memoize(
+            f"binance_derivatives_structure:{symbol}:{period}:{limit}",
+            ttl_seconds=45,
+            builder=lambda: self._build_binance_derivatives_structure(symbol, period=period, limit=limit),
+        )
 
+    def _build_binance_derivatives_structure(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 12) -> dict[str, Any]:
+        symbol = symbol.upper()
+        period = period.lower()
         premium_index = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/fapi/v1/premiumIndex",
             params={"symbol": symbol},
-            ttl_seconds=10,
+            ttl_seconds=20,
         )
         basis_rows = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/basis",
             params={"pair": symbol, "contractType": "PERPETUAL", "period": period, "limit": limit},
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
         open_interest_rows = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/openInterestHist",
             params={"symbol": symbol, "period": period, "limit": limit},
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
         top_position_rows = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/topLongShortPositionRatio",
             params={"symbol": symbol, "period": period, "limit": limit},
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
         top_account_rows = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/topLongShortAccountRatio",
             params={"symbol": symbol, "period": period, "limit": limit},
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
         global_ratio_rows = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/globalLongShortAccountRatio",
             params={"symbol": symbol, "period": period, "limit": limit},
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
         taker_volume_rows = self._http.get_json(
             "binance",
             f"{BINANCE_FUTURES_BASE}/futures/data/takerlongshortRatio",
             params={"symbol": symbol, "period": period, "limit": limit},
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
 
         normalized_basis = [self._normalize_binance_basis_row(row) for row in basis_rows if isinstance(row, dict)]
@@ -341,7 +467,107 @@ class GatewayService:
             },
         }
 
+    def get_binance_derivatives_overview(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 8) -> dict[str, Any]:
+        symbol = symbol.upper()
+        period = period.lower()
+        return self._memoize(
+            f"binance_derivatives_overview:{symbol}:{period}:{limit}",
+            ttl_seconds=45,
+            builder=lambda: self._build_binance_derivatives_overview(symbol, period=period, limit=limit),
+        )
+
+    def _build_binance_derivatives_overview(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 8) -> dict[str, Any]:
+        symbol = symbol.upper()
+        period = period.lower()
+        premium_index = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/fapi/v1/premiumIndex",
+            params={"symbol": symbol},
+            ttl_seconds=20,
+        )
+        basis_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/basis",
+            params={"pair": symbol, "contractType": "PERPETUAL", "period": period, "limit": limit},
+            ttl_seconds=60,
+        )
+        open_interest_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/openInterestHist",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=60,
+        )
+        top_position_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/topLongShortPositionRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=60,
+        )
+        global_ratio_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/globalLongShortAccountRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=60,
+        )
+        taker_volume_rows = self._http.get_json(
+            "binance",
+            f"{BINANCE_FUTURES_BASE}/futures/data/takerlongshortRatio",
+            params={"symbol": symbol, "period": period, "limit": limit},
+            ttl_seconds=60,
+        )
+
+        normalized_basis = [self._normalize_binance_basis_row(row) for row in basis_rows if isinstance(row, dict)]
+        normalized_open_interest = [self._normalize_binance_open_interest_hist_row(row) for row in open_interest_rows if isinstance(row, dict)]
+        normalized_top_position = [self._normalize_binance_ratio_row(row, "longShortRatio") for row in top_position_rows if isinstance(row, dict)]
+        normalized_global_ratio = [self._normalize_binance_ratio_row(row, "longShortRatio") for row in global_ratio_rows if isinstance(row, dict)]
+        normalized_taker_volume = [self._normalize_binance_taker_volume_row(row) for row in taker_volume_rows if isinstance(row, dict)]
+
+        basis_summary = self._build_binance_basis_summary(normalized_basis)
+        open_interest_summary = self._build_open_interest_hist_summary(normalized_open_interest)
+        top_position_summary = self._build_ratio_summary(normalized_top_position, "top_trader_position_ratio")
+        global_ratio_summary = self._build_ratio_summary(normalized_global_ratio, "global_long_short_ratio")
+        taker_volume_summary = self._build_taker_volume_summary(normalized_taker_volume)
+
+        current_mark_price = self._safe_float(premium_index.get("markPrice"))
+        current_index_price = self._safe_float(premium_index.get("indexPrice"))
+        current_spread = self._mark_index_spread(current_mark_price, current_index_price)
+
+        return {
+            "symbol": symbol,
+            "period": period,
+            "current": {
+                "mark_price": current_mark_price,
+                "index_price": current_index_price,
+                "last_funding_rate": self._safe_float(premium_index.get("lastFundingRate")),
+                "mark_index_spread": current_spread,
+                "mark_index_spread_pct": self._pct_of_value(current_spread, current_index_price),
+            },
+            "summary": {
+                "basis": basis_summary,
+                "open_interest": open_interest_summary,
+                "top_trader_position_ratio": top_position_summary,
+                "global_long_short_ratio": global_ratio_summary,
+                "taker_buy_sell_volume": taker_volume_summary,
+                "composite_view": self._build_binance_derivatives_composite_view(
+                    basis_summary=basis_summary,
+                    open_interest_summary=open_interest_summary,
+                    top_position_summary=top_position_summary,
+                    top_account_summary=None,
+                    global_ratio_summary=global_ratio_summary,
+                    taker_volume_summary=taker_volume_summary,
+                ),
+            },
+        }
+
     def get_bybit_market_structure(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        symbol = symbol.upper()
+        return self._memoize(
+            f"bybit_market_structure:{symbol}",
+            ttl_seconds=45,
+            builder=lambda: self._build_bybit_market_structure(symbol),
+        )
+
+    def _build_bybit_market_structure(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         symbol = symbol.upper()
         ticker_result = self._bybit_get_result(
             "/v5/market/tickers",
@@ -1233,6 +1459,18 @@ class GatewayService:
             "1w": 20,
             "1M": 12,
         }.get(interval, 10)
+
+    @staticmethod
+    def _binance_kline_ttl(interval: str) -> int:
+        return {
+            "15m": 30,
+            "1h": 60,
+            "4h": 180,
+            "8h": 300,
+            "1d": 900,
+            "1w": 3600,
+            "1M": 21600,
+        }.get(interval, 60)
 
     def _build_support_resistance_levels(
         self,

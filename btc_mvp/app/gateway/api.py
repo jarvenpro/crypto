@@ -75,11 +75,26 @@ def custom_openapi() -> dict:
             "description": "Public HTTPS base URL used by Custom GPT Actions.",
         }
     ]
-    schema["info"]["description"] = (
-        f"{app.description}\n\n"
-        "Authentication: configure Custom GPT Actions to send `X-API-Key: <your token>`.\n"
-        "A Bearer token in the `Authorization` header is also accepted for manual testing."
-    )
+    if config.api_token:
+        schema["info"]["description"] = (
+            f"{app.description}\n\n"
+            "Authentication: configure Custom GPT Actions to send `X-API-Key: <your token>`.\n"
+            "A Bearer token in the `Authorization` header is also accepted for manual testing."
+        )
+    else:
+        schema["info"]["description"] = (
+            f"{app.description}\n\n"
+            "Authentication: no API token is currently required."
+        )
+        for path_item in schema.get("paths", {}).values():
+            if not isinstance(path_item, dict):
+                continue
+            for operation in path_item.values():
+                if isinstance(operation, dict):
+                    operation.pop("security", None)
+        components = schema.get("components")
+        if isinstance(components, dict):
+            components.pop("securitySchemes", None)
     app.openapi_schema = schema
     return app.openapi_schema
 
@@ -122,7 +137,12 @@ def health(service: GatewayService = Depends(get_gateway_service)) -> dict:
     return service.health()
 
 
-@protected.get("/v1/crypto/overview", tags=["Overview"], summary="Get a compact crypto market overview for GPT")
+@protected.get(
+    "/v1/crypto/overview",
+    tags=["Overview"],
+    summary="Get a compact crypto market overview for GPT",
+    description="Quick triage endpoint for BTC direction. Use it first for a compact market snapshot, but for any final 8-12h judgment also call Binance multi-timeframe structure and Binance derivatives structure.",
+)
 def crypto_overview(
     symbol: str = Query("BTCUSDT", description="Binance symbol such as BTCUSDT."),
     service: GatewayService = Depends(get_gateway_service),
@@ -162,7 +182,12 @@ def binance_market(
     return service.get_binance_market(symbol.upper())
 
 
-@protected.get("/v1/sources/binance/derivatives-structure", tags=["Sources"], summary="Get Binance derivatives structure")
+@protected.get(
+    "/v1/sources/binance/derivatives-structure",
+    tags=["Sources"],
+    summary="Get Binance derivatives structure",
+    description="Required depth endpoint for final 8-12h BTC judgment. Returns mark-index spread, basis, open interest history, top trader ratios, global long-short ratio, and taker buy-sell volume.",
+)
 def binance_derivatives_structure(
     symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
     period: str = Query("1h", description="History period such as 15m, 30m, 1h, 2h, 4h, or 6h."),
@@ -172,7 +197,12 @@ def binance_derivatives_structure(
     return service.get_binance_derivatives_structure(symbol.upper(), period=period, limit=limit)
 
 
-@protected.get("/v1/sources/binance/multi-timeframe-structure", tags=["Sources"], summary="Get Binance multi-timeframe structure")
+@protected.get(
+    "/v1/sources/binance/multi-timeframe-structure",
+    tags=["Sources"],
+    summary="Get Binance multi-timeframe structure",
+    description="Required depth endpoint for final 8-12h BTC judgment. Returns 15m, 1h, 4h, 8h, 1d, 1w, and 1M structure with range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles.",
+)
 def binance_multi_timeframe_structure(
     symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
     service: GatewayService = Depends(get_gateway_service),
@@ -180,7 +210,12 @@ def binance_multi_timeframe_structure(
     return service.get_binance_multi_timeframe_structure(symbol.upper())
 
 
-@protected.get("/v1/sources/bybit/market-structure", tags=["Sources"], summary="Get Bybit derivatives validation snapshot")
+@protected.get(
+    "/v1/sources/bybit/market-structure",
+    tags=["Sources"],
+    summary="Get Bybit derivatives validation snapshot",
+    description="Secondary validation endpoint for 8-12h BTC judgment and fallback when Binance is temporarily rate-limited.",
+)
 def bybit_market_structure(
     symbol: str = Query("BTCUSDT", description="Linear perpetual symbol such as BTCUSDT."),
     service: GatewayService = Depends(get_gateway_service),

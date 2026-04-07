@@ -10,7 +10,7 @@ import httpx
 from app.gateway.config import GatewayConfig
 
 
-RETRIABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+RETRIABLE_STATUS_CODES = {408, 425, 500, 502, 503, 504}
 
 
 class UpstreamServiceError(RuntimeError):
@@ -48,6 +48,7 @@ class GatewayHttpClient:
     def __init__(self, config: GatewayConfig) -> None:
         self._config = config
         self._cache = TtlCache()
+        self._source_backoff_until: dict[str, float] = {}
         self._client = httpx.Client(
             timeout=config.http_timeout_seconds,
             follow_redirects=True,
@@ -119,6 +120,15 @@ class GatewayHttpClient:
     ) -> httpx.Response:
         attempts = self._config.http_max_retries + 1
         last_error: Exception | None = None
+        blocked_until = self._source_backoff_until.get(source)
+        now = monotonic()
+        if blocked_until and blocked_until > now:
+            retry_after = max(1, int(blocked_until - now))
+            raise UpstreamServiceError(
+                source,
+                f"{source} is temporarily cooling down after upstream rate limiting. Retry after {retry_after}s.",
+                status_code=503,
+            )
 
         for attempt in range(1, attempts + 1):
             try:
@@ -132,6 +142,10 @@ class GatewayHttpClient:
                 last_error = exc
                 status_code = exc.response.status_code
                 body_preview = exc.response.text[:400].strip()
+                if status_code in {418, 429}:
+                    retry_after = self._extract_retry_after_seconds(exc.response)
+                    default_cooldown = 120 if status_code == 418 else 60
+                    self._source_backoff_until[source] = monotonic() + (retry_after or default_cooldown)
                 if status_code in RETRIABLE_STATUS_CODES and attempt < attempts:
                     sleep(0.35 * attempt)
                     continue
@@ -155,3 +169,13 @@ class GatewayHttpClient:
             return f"{source}:{url}"
         sorted_pairs = "&".join(f"{key}={params[key]}" for key in sorted(params))
         return f"{source}:{url}?{sorted_pairs}"
+
+    @staticmethod
+    def _extract_retry_after_seconds(response: httpx.Response) -> int | None:
+        value = response.headers.get("Retry-After")
+        if value is None:
+            return None
+        try:
+            return max(1, int(float(value)))
+        except (TypeError, ValueError):
+            return None
