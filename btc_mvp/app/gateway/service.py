@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from time import monotonic
 from typing import Any
@@ -39,11 +41,20 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+@dataclass(slots=True)
+class _MemoEntry:
+    expires_at: float
+    stale_until: float
+    refreshed_at_monotonic: float
+    refreshed_at_iso: str
+    value: Any
+
+
 class GatewayService:
     def __init__(self, config: GatewayConfig, http_client: GatewayHttpClient) -> None:
         self._config = config
         self._http = http_client
-        self._memo_cache: dict[str, tuple[float, Any]] = {}
+        self._memo_cache: dict[str, _MemoEntry] = {}
 
     def health(self) -> dict[str, Any]:
         return {
@@ -68,7 +79,7 @@ class GatewayService:
 
     def crypto_overview(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
-        return self._memoize(f"crypto_overview:{symbol}", ttl_seconds=45, builder=lambda: self._build_crypto_overview(symbol))
+        return self._build_crypto_overview(symbol)
 
     def _build_crypto_overview(self, symbol: str) -> dict[str, Any]:
         root_symbol = self._extract_root_asset(symbol)
@@ -98,13 +109,87 @@ class GatewayService:
 
         return payload
 
-    def _memoize(self, key: str, ttl_seconds: int, builder) -> Any:
+    def _memoize(
+        self,
+        key: str,
+        ttl_seconds: int,
+        builder,
+        *,
+        stale_if_error_seconds: int = 0,
+    ) -> Any:
         now = monotonic()
         cached = self._memo_cache.get(key)
-        if cached and cached[0] > now:
-            return cached[1]
-        value = builder()
-        self._memo_cache[key] = (now + ttl_seconds, value)
+        if cached and cached.expires_at > now:
+            return self._with_cache_metadata(cached, now=now, status="cached")
+
+        try:
+            value = builder()
+        except UpstreamServiceError as exc:
+            if cached and cached.stale_until > now:
+                return self._with_cache_metadata(
+                    cached,
+                    now=now,
+                    status="stale",
+                    reason=exc.detail,
+                    source=exc.source,
+                )
+            raise
+
+        refreshed_at_iso = utc_now_iso()
+        entry = _MemoEntry(
+            expires_at=now + ttl_seconds,
+            stale_until=now + ttl_seconds + max(0, stale_if_error_seconds),
+            refreshed_at_monotonic=now,
+            refreshed_at_iso=refreshed_at_iso,
+            value=self._strip_cache_metadata(value),
+        )
+        self._memo_cache[key] = entry
+        return self._with_cache_metadata(entry, now=now, status="live")
+
+    @staticmethod
+    def _strip_cache_metadata(value: Any) -> Any:
+        sanitized = deepcopy(value)
+
+        def scrub(item: Any) -> None:
+            if isinstance(item, dict):
+                item.pop("_cache", None)
+                for nested in item.values():
+                    scrub(nested)
+                return
+            if isinstance(item, list):
+                for nested in item:
+                    scrub(nested)
+
+        scrub(sanitized)
+        return sanitized
+
+    @staticmethod
+    def _with_cache_metadata(
+        entry: _MemoEntry,
+        *,
+        now: float,
+        status: str,
+        reason: str | None = None,
+        source: str | None = None,
+    ) -> Any:
+        value = deepcopy(entry.value)
+        if not isinstance(value, dict):
+            return value
+
+        cache = {
+            "status": status,
+            "refreshed_at": entry.refreshed_at_iso,
+            "age_seconds": max(0, int(now - entry.refreshed_at_monotonic)),
+            "expires_in_seconds": max(0, int(entry.expires_at - now)),
+        }
+        if status == "stale":
+            cache["stale_if_error_expires_in_seconds"] = max(0, int(entry.stale_until - now))
+        if reason:
+            cache["reason"] = reason
+        if source:
+            cache["source"] = source
+
+        value["_cache"] = cache
         return value
 
     def macro_overview(self, fred_series_ids: list[str] | None = None) -> dict[str, Any]:
@@ -132,7 +217,12 @@ class GatewayService:
 
     def get_binance_market(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
-        return self._memoize(f"binance_market:{symbol}", ttl_seconds=20, builder=lambda: self._build_binance_market(symbol))
+        return self._memoize(
+            f"binance_market:{symbol}",
+            ttl_seconds=20,
+            stale_if_error_seconds=120,
+            builder=lambda: self._build_binance_market(symbol),
+        )
 
     def _build_binance_market(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
@@ -197,7 +287,12 @@ class GatewayService:
 
     def get_binance_market_overview(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
-        return self._memoize(f"binance_market_overview:{symbol}", ttl_seconds=20, builder=lambda: self._build_binance_market_overview(symbol))
+        return self._memoize(
+            f"binance_market_overview:{symbol}",
+            ttl_seconds=30,
+            stale_if_error_seconds=180,
+            builder=lambda: self._build_binance_market_overview(symbol),
+        )
 
     def _build_binance_market_overview(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
@@ -230,7 +325,8 @@ class GatewayService:
         symbol = symbol.upper()
         return self._memoize(
             f"binance_multi_timeframe_structure:{symbol}",
-            ttl_seconds=60,
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
             builder=lambda: self._build_binance_multi_timeframe_structure(symbol),
         )
 
@@ -302,7 +398,8 @@ class GatewayService:
         overview_key = f"binance_multi_timeframe_overview:{symbol}:{spot_price if spot_price is not None else 'na'}"
         return self._memoize(
             overview_key,
-            ttl_seconds=60,
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
             builder=lambda: self._build_binance_multi_timeframe_overview(symbol, spot_price=spot_price),
         )
 
@@ -358,7 +455,8 @@ class GatewayService:
         period = period.lower()
         return self._memoize(
             f"binance_derivatives_structure:{symbol}:{period}:{limit}",
-            ttl_seconds=45,
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
             builder=lambda: self._build_binance_derivatives_structure(symbol, period=period, limit=limit),
         )
 
@@ -472,7 +570,8 @@ class GatewayService:
         period = period.lower()
         return self._memoize(
             f"binance_derivatives_overview:{symbol}:{period}:{limit}",
-            ttl_seconds=45,
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
             builder=lambda: self._build_binance_derivatives_overview(symbol, period=period, limit=limit),
         )
 
@@ -563,7 +662,8 @@ class GatewayService:
         symbol = symbol.upper()
         return self._memoize(
             f"bybit_market_structure:{symbol}",
-            ttl_seconds=45,
+            ttl_seconds=90,
+            stale_if_error_seconds=600,
             builder=lambda: self._build_bybit_market_structure(symbol),
         )
 
@@ -646,6 +746,16 @@ class GatewayService:
         }
 
     def get_coingecko_simple_price(self, asset_id: str, vs_currency: str = "usd") -> dict[str, Any]:
+        asset_id = asset_id.strip().lower()
+        vs_currency = vs_currency.strip().lower()
+        return self._memoize(
+            f"coingecko_simple_price:{asset_id}:{vs_currency}",
+            ttl_seconds=180,
+            stale_if_error_seconds=1200,
+            builder=lambda: self._build_coingecko_simple_price(asset_id, vs_currency),
+        )
+
+    def _build_coingecko_simple_price(self, asset_id: str, vs_currency: str = "usd") -> dict[str, Any]:
         headers: dict[str, str] = {}
         if self._config.coingecko_pro_api_key:
             headers["x-cg-pro-api-key"] = self._config.coingecko_pro_api_key
@@ -664,7 +774,7 @@ class GatewayService:
                 "include_last_updated_at": "true",
             },
             headers=headers or None,
-            ttl_seconds=20,
+            ttl_seconds=60,
         )
 
         if asset_id not in payload:
@@ -777,6 +887,14 @@ class GatewayService:
         }
 
     def get_fear_greed_latest(self) -> dict[str, Any]:
+        return self._memoize(
+            "fear_greed_latest",
+            ttl_seconds=300,
+            stale_if_error_seconds=3600,
+            builder=self._build_fear_greed_latest,
+        )
+
+    def _build_fear_greed_latest(self) -> dict[str, Any]:
         payload = self._http.get_json(
             "fear_greed",
             FEAR_GREED_URL,
@@ -795,10 +913,15 @@ class GatewayService:
         }
 
     def get_mempool_recommended_fees(self) -> dict[str, Any]:
-        return self._http.get_json(
-            "mempool",
-            MEMPOOL_FEES_URL,
-            ttl_seconds=30,
+        return self._memoize(
+            "mempool_recommended_fees",
+            ttl_seconds=60,
+            stale_if_error_seconds=300,
+            builder=lambda: self._http.get_json(
+                "mempool",
+                MEMPOOL_FEES_URL,
+                ttl_seconds=30,
+            ),
         )
 
     def get_treasury_latest_avg_rates(self) -> dict[str, Any]:
