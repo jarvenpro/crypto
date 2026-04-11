@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -81,33 +82,71 @@ class GatewayService:
 
     def crypto_overview(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()
-        return self._build_crypto_overview(symbol)
+        return self._memoize(
+            f"crypto_overview:{symbol}",
+            ttl_seconds=20,
+            stale_if_error_seconds=120,
+            builder=lambda: self._build_crypto_overview(symbol),
+        )
 
     def _build_crypto_overview(self, symbol: str) -> dict[str, Any]:
         root_symbol = self._extract_root_asset(symbol)
         coingecko_id = COINGECKO_IDS.get(root_symbol)
-        okx_market = self._capture(lambda: self.get_okx_market_overview(symbol))
-        reference_price = None
-        if okx_market.get("ok"):
-            reference_price = okx_market.get("data", {}).get("last_price")
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            okx_market_future = executor.submit(self._capture, lambda: self.get_okx_market_overview(symbol))
+            okx_derivatives_future = executor.submit(self._capture, lambda: self.get_okx_derivatives_overview(symbol))
+            bybit_future = executor.submit(self._capture, lambda: self.get_bybit_market_structure(symbol))
+            fear_greed_future = executor.submit(self._capture, self.get_fear_greed_latest)
+            mempool_future = (
+                executor.submit(self._capture, self.get_mempool_recommended_fees)
+                if root_symbol == "BTC"
+                else None
+            )
+            coingecko_future = (
+                executor.submit(self._capture, lambda: self.get_coingecko_simple_price(coingecko_id))
+                if coingecko_id
+                else None
+            )
+
+            okx_market = okx_market_future.result()
+            reference_price = None
+            if okx_market.get("ok"):
+                reference_price = okx_market.get("data", {}).get("last_price")
+
+            okx_structure_future = executor.submit(
+                self._capture,
+                lambda: self.get_okx_multi_timeframe_overview(symbol, reference_price=reference_price),
+            )
+
+            okx_derivatives = okx_derivatives_future.result()
+            bybit = bybit_future.result()
+            fear_greed = fear_greed_future.result()
+            mempool = (
+                mempool_future.result()
+                if mempool_future is not None
+                else self._skipped("Mempool data is only mapped for BTC.")
+            )
+            coingecko = (
+                coingecko_future.result()
+                if coingecko_future is not None
+                else self._skipped(f"No CoinGecko asset mapping configured for {root_symbol}.")
+            )
+            okx_structure = okx_structure_future.result()
 
         payload = {
             "generated_at": utc_now_iso(),
             "symbol": symbol,
             "sources": {
                 "okx": okx_market,
-                "okx_structure": self._capture(lambda: self.get_okx_multi_timeframe_overview(symbol, reference_price=reference_price)),
-                "okx_derivatives": self._capture(lambda: self.get_okx_derivatives_overview(symbol)),
-                "bybit": self._capture(lambda: self.get_bybit_market_structure(symbol)),
-                "fear_greed": self._capture(self.get_fear_greed_latest),
-                "mempool": self._capture(self.get_mempool_recommended_fees) if root_symbol == "BTC" else self._skipped("Mempool data is only mapped for BTC."),
+                "okx_structure": okx_structure,
+                "okx_derivatives": okx_derivatives,
+                "bybit": bybit,
+                "fear_greed": fear_greed,
+                "mempool": mempool,
             },
         }
 
-        if coingecko_id:
-            payload["sources"]["coingecko"] = self._capture(lambda: self.get_coingecko_simple_price(coingecko_id))
-        else:
-            payload["sources"]["coingecko"] = self._skipped(f"No CoinGecko asset mapping configured for {root_symbol}.")
+        payload["sources"]["coingecko"] = coingecko
 
         return payload
 
@@ -305,13 +344,18 @@ class GatewayService:
         }
 
         timeframe_candles: dict[str, list[dict[str, Any]]] = {}
-        for interval, limit in interval_limits.items():
-            rows = self._okx_get_rows(
-                "/api/v5/market/candles",
-                params={"instId": swap_inst_id, "bar": self._to_okx_bar(interval), "limit": limit},
-                ttl_seconds=self._okx_kline_ttl(interval),
-            )
-            timeframe_candles[interval] = self._normalize_okx_candle_rows(rows)
+        with ThreadPoolExecutor(max_workers=len(interval_limits)) as executor:
+            future_map = {
+                interval: executor.submit(
+                    self._okx_get_rows,
+                    "/api/v5/market/candles",
+                    params={"instId": swap_inst_id, "bar": self._to_okx_bar(interval), "limit": limit},
+                    ttl_seconds=self._okx_kline_ttl(interval),
+                )
+                for interval, limit in interval_limits.items()
+            }
+            for interval, future in future_map.items():
+                timeframe_candles[interval] = self._normalize_okx_candle_rows(future.result())
 
         derived_levels = self._build_multi_timeframe_levels(timeframe_candles)
         support_resistance = self._build_support_resistance_levels(timeframe_candles, reference_price)
@@ -350,52 +394,64 @@ class GatewayService:
         okx_period = self._to_okx_period(period)
         root_asset = self._extract_root_asset(symbol)
 
-        ticker = self._okx_get_first_row(
-            "/api/v5/market/ticker",
-            params={"instId": swap_inst_id},
-            ttl_seconds=20,
-        )
-        mark_price_row = self._okx_get_first_row(
-            "/api/v5/public/mark-price",
-            params={"instType": "SWAP", "instId": swap_inst_id},
-            ttl_seconds=20,
-        )
-        index_ticker = self._okx_get_first_row(
-            "/api/v5/market/index-tickers",
-            params={"instId": index_inst_id},
-            ttl_seconds=20,
-        )
-        funding_current = self._okx_get_first_row(
-            "/api/v5/public/funding-rate",
-            params={"instId": swap_inst_id},
-            ttl_seconds=30,
-        )
-        funding_history = self._normalize_okx_funding_rows(
-            self._okx_get_rows(
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            ticker_future = executor.submit(
+                self._okx_get_first_row,
+                "/api/v5/market/ticker",
+                params={"instId": swap_inst_id},
+                ttl_seconds=20,
+            )
+            mark_price_future = executor.submit(
+                self._okx_get_first_row,
+                "/api/v5/public/mark-price",
+                params={"instType": "SWAP", "instId": swap_inst_id},
+                ttl_seconds=20,
+            )
+            index_ticker_future = executor.submit(
+                self._okx_get_first_row,
+                "/api/v5/market/index-tickers",
+                params={"instId": index_inst_id},
+                ttl_seconds=20,
+            )
+            funding_current_future = executor.submit(
+                self._okx_get_first_row,
+                "/api/v5/public/funding-rate",
+                params={"instId": swap_inst_id},
+                ttl_seconds=30,
+            )
+            funding_history_future = executor.submit(
+                self._okx_get_rows,
                 "/api/v5/public/funding-rate-history",
                 params={"instId": swap_inst_id, "limit": limit},
                 ttl_seconds=60,
             )
-        )
-        open_interest_history = self._normalize_okx_open_interest_rows(
-            self._okx_get_rows(
+            open_interest_history_future = executor.submit(
+                self._okx_get_rows,
                 "/api/v5/rubik/stat/contracts/open-interest-volume",
                 params={"ccy": root_asset, "period": okx_period},
                 ttl_seconds=60,
             )
-        )
-        long_short_history = self._normalize_okx_long_short_ratio_rows(
-            self._okx_get_rows(
+            long_short_history_future = executor.submit(
+                self._okx_get_rows,
                 "/api/v5/rubik/stat/contracts/long-short-account-ratio",
                 params={"ccy": root_asset, "period": okx_period},
                 ttl_seconds=60,
             )
-        )
-        open_interest_current = self._okx_get_first_row(
-            "/api/v5/public/open-interest",
-            params={"instType": "SWAP", "instId": swap_inst_id},
-            ttl_seconds=30,
-        )
+            open_interest_current_future = executor.submit(
+                self._okx_get_first_row,
+                "/api/v5/public/open-interest",
+                params={"instType": "SWAP", "instId": swap_inst_id},
+                ttl_seconds=30,
+            )
+
+            ticker = ticker_future.result()
+            mark_price_row = mark_price_future.result()
+            index_ticker = index_ticker_future.result()
+            funding_current = funding_current_future.result()
+            funding_history = self._normalize_okx_funding_rows(funding_history_future.result())
+            open_interest_history = self._normalize_okx_open_interest_rows(open_interest_history_future.result())
+            long_short_history = self._normalize_okx_long_short_ratio_rows(long_short_history_future.result())
+            open_interest_current = open_interest_current_future.result()
 
         last_price = self._safe_float(ticker.get("last"))
         mark_price = self._safe_float(mark_price_row.get("markPx"))
