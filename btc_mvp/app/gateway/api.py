@@ -150,6 +150,47 @@ def crypto_overview(
     return service.crypto_overview(symbol.upper())
 
 
+@protected.get(
+    "/v1/debug/okx/market-overview",
+    tags=["Debug"],
+    summary="Debug OKX market overview",
+    include_in_schema=False,
+)
+def debug_okx_market_overview(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_okx_market_overview(symbol.upper())
+
+
+@protected.get(
+    "/v1/debug/okx/multi-timeframe-overview",
+    tags=["Debug"],
+    summary="Debug OKX multi-timeframe overview",
+    include_in_schema=False,
+)
+def debug_okx_multi_timeframe_overview(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_okx_multi_timeframe_overview(symbol.upper())
+
+
+@protected.get(
+    "/v1/debug/okx/derivatives-overview",
+    tags=["Debug"],
+    summary="Debug OKX derivatives overview",
+    include_in_schema=False,
+)
+def debug_okx_derivatives_overview(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    period: str = Query("1h", description="History period such as 15m, 30m, 1h, 2h, 4h, or 6h."),
+    limit: int = Query(8, ge=3, le=30, description="Number of historical points to return."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_okx_derivatives_overview(symbol.upper(), period=period, limit=limit)
+
+
 @protected.get("/v1/macro/overview", tags=["Overview"], summary="Get a compact macro overview for GPT")
 def macro_overview(
     fred_series: str = Query(
