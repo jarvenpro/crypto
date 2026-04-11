@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+import html
+import re
 from xml.etree import ElementTree
 
 from app.gateway.config import GatewayConfig
 from app.gateway.http import GatewayHttpClient, UpstreamServiceError
+from app.gateway.liquidity import LiquidityContextBuilder
 
 
 BINANCE_SPOT_BASE = "https://api.binance.com"
@@ -23,11 +28,16 @@ SEC_FILES_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions"
 CFTC_COT_URL = "https://publicreporting.cftc.gov/resource/6dca-aqww.json"
 FED_MONETARY_FEED = "https://www.federalreserve.gov/feeds/press_monetary.xml"
+FOMC_SCHEDULE_URL = "https://www.federalreserve.gov/newsevents/pressreleases/monetary20240809a.htm"
 MEMPOOL_FEES_URL = "https://mempool.space/api/v1/fees/recommended"
 FEAR_GREED_URL = "https://api.alternative.me/fng/"
 COINGECKO_SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 COINGLASS_BASE = "https://open-api-v4.coinglass.com"
 BYBIT_BASE = "https://api.bybit.com"
+DERIBIT_BASE = "https://www.deribit.com/api/v2"
+BLS_RELEASE_CALENDAR_ICS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
+BEA_RELEASE_DATES_URL = "https://apps.bea.gov/API/signup/release_dates.json"
+TREASURY_UPCOMING_AUCTIONS_URL = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/upcoming_auctions"
 
 COINGECKO_IDS = {
     "BTC": "bitcoin",
@@ -37,6 +47,19 @@ COINGECKO_IDS = {
 
 DEFAULT_FRED_SERIES = ("FEDFUNDS", "DGS10", "UNRATE")
 DEFAULT_BITCOIN_ETF_ENTITIES = ("IBIT", "FBTC", "GBTC")
+NY_TZ = "America/New_York"
+
+
+@dataclass(slots=True)
+class _MacroEvent:
+    source: str
+    event_name: str
+    category: str
+    importance: str
+    scheduled_at_utc: datetime | None
+    scheduled_date: date | None
+    time_precision: str
+    metadata: dict[str, Any]
 
 
 def utc_now_iso() -> str:
@@ -245,6 +268,237 @@ class GatewayService:
                 "sec": self._capture(lambda: self.get_sec_recent_filings_for_entities(sec_entities)),
             },
         }
+
+    def get_macro_event_calendar(self, horizon_hours: int = 72, major_only: bool = True) -> dict[str, Any]:
+        horizon_hours = max(8, min(int(horizon_hours), 336))
+        cache_key = f"macro_event_calendar:{horizon_hours}:{major_only}"
+        return self._memoize(
+            cache_key,
+            ttl_seconds=1800,
+            stale_if_error_seconds=14400,
+            builder=lambda: self._build_macro_event_calendar(horizon_hours=horizon_hours, major_only=major_only),
+        )
+
+    def _build_macro_event_calendar(self, *, horizon_hours: int, major_only: bool) -> dict[str, Any]:
+        now_utc = datetime.now(timezone.utc)
+        horizon_end = now_utc + timedelta(hours=horizon_hours)
+
+        events: list[_MacroEvent] = []
+        source_status: dict[str, Any] = {}
+        for source_name, fetcher in (
+            ("bls", self._fetch_bls_release_events),
+            ("bea", self._fetch_bea_release_events),
+            ("fomc", self._fetch_fomc_schedule_events),
+            ("treasury", self._fetch_treasury_auction_events),
+        ):
+            try:
+                fetched = fetcher()
+                events.extend(fetched)
+                source_status[source_name] = {"ok": True, "count": len(fetched)}
+            except UpstreamServiceError as exc:
+                source_status[source_name] = {"ok": False, "reason": exc.detail}
+
+        allowed_importance = {"very_high", "high", "medium"} if major_only else {"very_high", "high", "medium", "low"}
+        upcoming_events: list[_MacroEvent] = []
+        for event in events:
+            if event.importance not in allowed_importance:
+                continue
+            if event.scheduled_at_utc is not None:
+                if now_utc <= event.scheduled_at_utc <= horizon_end:
+                    upcoming_events.append(event)
+                continue
+            if event.scheduled_date is None:
+                continue
+            if now_utc.date() <= event.scheduled_date <= horizon_end.date():
+                upcoming_events.append(event)
+
+        upcoming_events = self._dedupe_macro_events(upcoming_events)
+        normalized_events = [self._serialize_macro_event(event, now_utc=now_utc) for event in upcoming_events]
+
+        next_8h = [event for event in normalized_events if event.get("is_within_next_8h")]
+        next_24h = [event for event in normalized_events if event.get("starts_in_hours") is not None and event["starts_in_hours"] <= 24]
+        date_only_events = [event for event in normalized_events if event.get("time_precision") == "date"]
+
+        return {
+            "generated_at": utc_now_iso(),
+            "current_time_utc": now_utc.replace(microsecond=0).isoformat(),
+            "horizon_hours": horizon_hours,
+            "major_only": major_only,
+            "summary": {
+                "events_within_horizon": len(normalized_events),
+                "events_within_next_8h": len(next_8h),
+                "events_within_next_24h": len(next_24h),
+                "date_only_events_within_horizon": len(date_only_events),
+                "highest_importance_within_next_8h": self._highest_event_importance(next_8h),
+                "sources_covered": sorted({event["source"] for event in normalized_events}),
+            },
+            "source_status": source_status,
+            "events": normalized_events,
+        }
+
+    def get_liquidity_summary(
+        self,
+        symbol: str = "BTCUSDT",
+        depth_limit: int = 100,
+        include_binance: bool = False,
+        include_okx: bool = True,
+        include_bybit: bool = True,
+    ) -> dict[str, Any]:
+        symbol = symbol.upper()
+        requested_depth_limit = max(50, min(int(depth_limit), 500))
+        cache_key = f"liquidity_summary:{symbol}:{requested_depth_limit}:{include_binance}:{include_okx}:{include_bybit}"
+        return self._memoize(
+            cache_key,
+            ttl_seconds=20,
+            stale_if_error_seconds=120,
+            builder=lambda: self._build_liquidity_summary(
+                symbol=symbol,
+                depth_limit=requested_depth_limit,
+                include_binance=include_binance,
+                include_okx=include_okx,
+                include_bybit=include_bybit,
+            ),
+        )
+
+    def _build_liquidity_summary(
+        self,
+        *,
+        symbol: str,
+        depth_limit: int,
+        include_binance: bool,
+        include_okx: bool,
+        include_bybit: bool,
+    ) -> dict[str, Any]:
+        liquidity = LiquidityContextBuilder(self._http)
+        venues: dict[str, Any] = {}
+        source_status: dict[str, Any] = {}
+        depth_limits: dict[str, int | None] = {
+            "requested": depth_limit,
+            "binance": liquidity._normalize_binance_depth_limit(depth_limit) if include_binance else None,
+            "okx": min(depth_limit, 200) if include_okx else None,
+            "bybit": min(depth_limit, 200) if include_bybit else None,
+        }
+
+        reference_price: float | None = None
+        if include_okx:
+            try:
+                okx_orderbook = liquidity._get_okx_orderbook(symbol, depth_limit=depth_limits["okx"] or 100)
+                reference_price = okx_orderbook.get("mid_price") or reference_price
+                venues["okx"] = {
+                    "ok": True,
+                    "orderbook": liquidity._build_orderbook_summary("OKX", okx_orderbook, reference_price),
+                }
+                source_status["okx"] = {"ok": True}
+            except UpstreamServiceError as exc:
+                source_status["okx"] = {"ok": False, "reason": exc.detail}
+        if include_bybit:
+            try:
+                bybit_orderbook = liquidity._get_bybit_orderbook(symbol, depth_limit=depth_limits["bybit"] or 100)
+                reference_price = reference_price or bybit_orderbook.get("mid_price")
+                venues["bybit"] = {
+                    "ok": True,
+                    "orderbook": liquidity._build_orderbook_summary("BYBIT", bybit_orderbook, reference_price),
+                }
+                source_status["bybit"] = {"ok": True}
+            except UpstreamServiceError as exc:
+                source_status["bybit"] = {"ok": False, "reason": exc.detail}
+        if include_binance:
+            try:
+                binance_orderbook = liquidity._get_binance_orderbook(symbol, depth_limit=depth_limits["binance"] or 50)
+                reference_price = reference_price or binance_orderbook.get("mid_price")
+                venues["binance"] = {
+                    "ok": True,
+                    "orderbook": liquidity._build_orderbook_summary("BINANCE", binance_orderbook, reference_price),
+                }
+                source_status["binance"] = {"ok": True}
+            except UpstreamServiceError as exc:
+                source_status["binance"] = {"ok": False, "reason": exc.detail}
+
+        if not venues:
+            raise UpstreamServiceError("liquidity", "At least one exchange must be enabled for liquidity summary.")
+
+        combined = self._build_orderbook_liquidity_view(venues, reference_price)
+        return {
+            "generated_at": utc_now_iso(),
+            "symbol": symbol,
+            "reference_price": reference_price,
+            "depth_limits": depth_limits,
+            "venues": venues,
+            "source_status": source_status,
+            "combined": combined,
+            "limitations": {
+                "liquidation_heatmap": {
+                    "available": False,
+                    "reason": "No stable free REST source provides a complete liquidation heatmap.",
+                    "replacement": "Use cross-exchange orderbook walls, band depth imbalance, and sweep-risk summary as the free proxy.",
+                },
+                "hanging_order_map": {
+                    "available": True,
+                    "scope": "Snapshot-based orderbook walls and near-price heatmap bands.",
+                },
+            },
+        }
+
+    def get_liquidity_context(
+        self,
+        symbol: str = "BTCUSDT",
+        depth_limit: int = 100,
+        liquidation_sample_seconds: int = 4,
+        include_binance: bool = False,
+        include_okx: bool = True,
+        include_bybit: bool = True,
+    ) -> dict[str, Any]:
+        symbol = symbol.upper()
+        requested_depth_limit = max(50, min(int(depth_limit), 500))
+        liquidation_sample_seconds = max(2, min(int(liquidation_sample_seconds), 8))
+        cache_key = (
+            f"liquidity_context:{symbol}:{requested_depth_limit}:{liquidation_sample_seconds}:"
+            f"{include_binance}:{include_okx}:{include_bybit}"
+        )
+        return self._memoize(
+            cache_key,
+            ttl_seconds=15,
+            stale_if_error_seconds=60,
+            builder=lambda: self._build_liquidity_context(
+                symbol=symbol,
+                depth_limit=requested_depth_limit,
+                liquidation_sample_seconds=liquidation_sample_seconds,
+                include_binance=include_binance,
+                include_okx=include_okx,
+                include_bybit=include_bybit,
+            ),
+        )
+
+    def _build_liquidity_context(
+        self,
+        *,
+        symbol: str,
+        depth_limit: int,
+        liquidation_sample_seconds: int,
+        include_binance: bool,
+        include_okx: bool,
+        include_bybit: bool,
+    ) -> dict[str, Any]:
+        liquidity = LiquidityContextBuilder(self._http)
+        payload = asyncio.run(
+            liquidity.build_context(
+                symbol=symbol,
+                depth_limit=depth_limit,
+                liquidation_sample_seconds=liquidation_sample_seconds,
+                include_binance=include_binance,
+                include_bybit=include_bybit,
+                include_okx=include_okx,
+            )
+        )
+        payload["limitations"] = {
+            "scope": "Short sampled liquidation flow and current orderbook structure.",
+            "not_included": [
+                "long-history liquidation heatmap",
+                "full orderbook replay",
+                "commercial liquidation clustering models",
+            ],
+        }
+        return payload
 
     def get_okx_market_overview(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
         symbol = symbol.upper()
@@ -1081,6 +1335,63 @@ class GatewayService:
             "metrics": payload[asset_id],
         }
 
+    def get_deribit_options_context(self, currency: str = "BTC") -> dict[str, Any]:
+        currency = currency.strip().upper() or "BTC"
+        return self._memoize(
+            f"deribit_options_context:{currency}",
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
+            builder=lambda: self._build_deribit_options_context(currency),
+        )
+
+    def _build_deribit_options_context(self, currency: str) -> dict[str, Any]:
+        now_utc = datetime.now(timezone.utc)
+        end_timestamp = int(now_utc.timestamp() * 1000)
+        start_timestamp = int((now_utc - timedelta(hours=24)).timestamp() * 1000)
+
+        option_rows = self._deribit_public_get(
+            "get_book_summary_by_currency",
+            params={"currency": currency, "kind": "option"},
+            ttl_seconds=30,
+        )
+        future_rows = self._deribit_public_get(
+            "get_book_summary_by_currency",
+            params={"currency": currency, "kind": "future"},
+            ttl_seconds=30,
+        )
+        historical_vol_rows = self._deribit_public_get(
+            "get_historical_volatility",
+            params={"currency": currency},
+            ttl_seconds=300,
+        )
+        vol_index_payload = self._deribit_public_get(
+            "get_volatility_index_data",
+            params={
+                "currency": currency,
+                "resolution": 60,
+                "start_timestamp": start_timestamp,
+                "end_timestamp": end_timestamp,
+            },
+            ttl_seconds=120,
+        )
+
+        if not isinstance(option_rows, list) or not option_rows:
+            raise UpstreamServiceError("deribit", f"Deribit returned no option data for {currency}.")
+        if not isinstance(future_rows, list):
+            raise UpstreamServiceError("deribit", f"Deribit returned invalid futures data for {currency}.")
+
+        return {
+            "generated_at": utc_now_iso(),
+            "currency": currency,
+            "options": self._build_deribit_option_summary(option_rows),
+            "nearest_expiries": self._build_deribit_nearest_expiry_summaries(option_rows)[:3],
+            "futures": self._build_deribit_futures_summary(future_rows),
+            "historical_volatility": self._build_deribit_historical_vol_summary(historical_vol_rows if isinstance(historical_vol_rows, list) else []),
+            "volatility_index": self._build_deribit_vol_index_summary(
+                vol_index_payload.get("data", []) if isinstance(vol_index_payload, dict) else []
+            ),
+        }
+
     def get_coinglass_market_structure(self, symbol: str = "BTCUSDT", exchange: str = "OKX", interval: str = "1h") -> dict[str, Any]:
         if not self._config.coinglass_api_key:
             raise UpstreamServiceError("coinglass", "COINGLASS_API_KEY is not configured.", status_code=424)
@@ -1386,6 +1697,436 @@ class GatewayService:
             "title": self._xml_text(channel, "title"),
             "items": items,
         }
+
+    def _fetch_bls_release_events(self) -> list[_MacroEvent]:
+        ics_text = self._http.get_text(
+            "bls_schedule",
+            BLS_RELEASE_CALENDAR_ICS_URL,
+            ttl_seconds=21600,
+        )
+        events: list[_MacroEvent] = []
+        for raw_block in self._parse_ics_events(ics_text):
+            summary = str(raw_block.get("SUMMARY") or "").strip()
+            dtstart_key = next((key for key in raw_block if key.startswith("DTSTART")), None)
+            starts_at = self._parse_ics_start(
+                f"{dtstart_key}:{raw_block[dtstart_key]}" if dtstart_key else raw_block.get("DTSTART")
+            )
+            if not summary or starts_at is None:
+                continue
+            category, importance = self._classify_bls_release(summary)
+            events.append(
+                _MacroEvent(
+                    source="bls",
+                    event_name=summary,
+                    category=category,
+                    importance=importance,
+                    scheduled_at_utc=starts_at.astimezone(timezone.utc),
+                    scheduled_date=None,
+                    time_precision="datetime",
+                    metadata={
+                        "location": raw_block.get("LOCATION"),
+                    },
+                )
+            )
+        return events
+
+    def _fetch_bea_release_events(self) -> list[_MacroEvent]:
+        payload = self._http.get_json(
+            "bea_schedule",
+            BEA_RELEASE_DATES_URL,
+            ttl_seconds=21600,
+        )
+        if not isinstance(payload, dict):
+            raise UpstreamServiceError("bea_schedule", "BEA release schedule returned an unexpected payload.")
+
+        events: list[_MacroEvent] = []
+        for name, item in payload.items():
+            if not isinstance(item, dict):
+                continue
+            release_dates = item.get("release_dates")
+            if not isinstance(release_dates, list):
+                continue
+            category, importance = self._classify_bea_release(name)
+            to_be_rescheduled = {
+                str(value)
+                for value in item.get("to_be_rescheduled", [])
+                if isinstance(value, str)
+            }
+            for raw_date in release_dates:
+                if not isinstance(raw_date, str):
+                    continue
+                scheduled_at = self._parse_iso_datetime(raw_date)
+                if scheduled_at is None:
+                    continue
+                events.append(
+                    _MacroEvent(
+                        source="bea",
+                        event_name=name,
+                        category=category,
+                        importance=importance,
+                        scheduled_at_utc=scheduled_at.astimezone(timezone.utc),
+                        scheduled_date=None,
+                        time_precision="datetime",
+                        metadata={
+                            "reschedule_flag": raw_date in to_be_rescheduled,
+                        },
+                    )
+                )
+        return events
+
+    def _fetch_fomc_schedule_events(self) -> list[_MacroEvent]:
+        html_text = self._http.get_text(
+            "fomc_schedule",
+            FOMC_SCHEDULE_URL,
+            ttl_seconds=86400,
+        )
+        events: list[_MacroEvent] = []
+        for section_year, section_html in re.findall(r"<p>For (\d{4}):</p>\s*<ul>(.*?)</ul>", html_text, flags=re.I | re.S):
+            base_year = self._safe_int(section_year)
+            if base_year is None:
+                continue
+            for raw_item in re.findall(r"<li>(.*?)</li>", section_html, flags=re.I | re.S):
+                line = html.unescape(re.sub(r"<[^>]+>", "", raw_item)).strip()
+                if not line:
+                    continue
+                scheduled_at, meeting_start = self._parse_fomc_schedule_line(line=line, base_year=base_year)
+                if scheduled_at is None:
+                    continue
+                events.append(
+                    _MacroEvent(
+                        source="fomc",
+                        event_name="FOMC statement and Chair press conference",
+                        category="monetary_policy",
+                        importance="very_high",
+                        scheduled_at_utc=scheduled_at.astimezone(timezone.utc),
+                        scheduled_date=None,
+                        time_precision="datetime",
+                        metadata={
+                            "meeting_start_date": meeting_start.isoformat() if meeting_start else None,
+                            "meeting_schedule_line": line,
+                        },
+                    )
+                )
+        return events
+
+    def _fetch_treasury_auction_events(self) -> list[_MacroEvent]:
+        payload = self._http.get_json(
+            "treasury_auctions",
+            TREASURY_UPCOMING_AUCTIONS_URL,
+            params={"page[size]": 100, "sort": "auction_date"},
+            ttl_seconds=21600,
+        )
+        rows = payload.get("data", [])
+        if not isinstance(rows, list):
+            raise UpstreamServiceError("treasury_auctions", "Treasury upcoming auctions returned an unexpected payload.")
+
+        events: list[_MacroEvent] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            auction_date = self._parse_date_only(row.get("auction_date"))
+            if auction_date is None:
+                continue
+            security_type = str(row.get("security_type") or "").strip()
+            security_term = str(row.get("security_term") or "").strip()
+            importance = self._classify_treasury_auction_importance(security_type, security_term)
+            events.append(
+                _MacroEvent(
+                    source="treasury",
+                    event_name=f"Treasury {security_term} {security_type} auction".strip(),
+                    category="treasury_auction",
+                    importance=importance,
+                    scheduled_at_utc=None,
+                    scheduled_date=auction_date,
+                    time_precision="date",
+                    metadata={
+                        "announcement_date": row.get("announcemt_date"),
+                        "issue_date": row.get("issue_date"),
+                        "offering_amount_usd": self._safe_float(row.get("offering_amt")),
+                        "security_type": security_type or None,
+                        "security_term": security_term or None,
+                    },
+                )
+            )
+        return events
+
+    def _build_orderbook_liquidity_view(self, venues: dict[str, Any], reference_price: float | None) -> dict[str, Any]:
+        orderbook_venues = [
+            venue_data.get("orderbook")
+            for venue_data in venues.values()
+            if isinstance(venue_data, dict) and isinstance(venue_data.get("orderbook"), dict)
+        ]
+        upper_wall_strength = 0.0
+        lower_wall_strength = 0.0
+        for venue in orderbook_venues:
+            for wall in venue.get("top_ask_walls", [])[:3]:
+                upper_wall_strength += wall.get("notional", 0.0)
+            for wall in venue.get("top_bid_walls", [])[:3]:
+                lower_wall_strength += wall.get("notional", 0.0)
+
+        if upper_wall_strength > lower_wall_strength * 1.15:
+            wall_bias = "upside_heavier"
+        elif lower_wall_strength > upper_wall_strength * 1.15:
+            wall_bias = "downside_heavier"
+        else:
+            wall_bias = "balanced"
+
+        band_biases: dict[str, str] = {}
+        for band_label in ("0.10%", "0.25%", "0.50%", "1.00%"):
+            bid_total = 0.0
+            ask_total = 0.0
+            for venue in orderbook_venues:
+                band = venue.get("band_depth", {}).get(band_label, {})
+                bid_total += band.get("bid_notional", 0.0) or 0.0
+                ask_total += band.get("ask_notional", 0.0) or 0.0
+            if abs(bid_total - ask_total) < max(bid_total, ask_total, 1.0) * 0.05:
+                bias = "balanced"
+            elif bid_total > ask_total:
+                bias = "bid_heavier"
+            else:
+                bias = "ask_heavier"
+            band_biases[band_label] = bias
+
+        narratives: list[str] = []
+        if wall_bias == "upside_heavier":
+            narratives.append("Near-price ask walls are thicker than bid walls, so upside sweeps face heavier resting liquidity.")
+        elif wall_bias == "downside_heavier":
+            narratives.append("Near-price bid walls are thicker than ask walls, so downside sweeps face heavier resting liquidity.")
+        else:
+            narratives.append("Near-price resting liquidity looks relatively balanced across sides.")
+
+        if band_biases.get("0.25%") == "ask_heavier" and wall_bias == "upside_heavier":
+            sweep_risk = "upside_sweep_risk_high"
+        elif band_biases.get("0.25%") == "bid_heavier" and wall_bias == "downside_heavier":
+            sweep_risk = "downside_sweep_risk_high"
+        else:
+            sweep_risk = "two_sided_or_mixed"
+
+        return {
+            "reference_price": reference_price,
+            "wall_bias": wall_bias,
+            "band_biases": band_biases,
+            "upside_wall_strength_usd": round(upper_wall_strength, 2),
+            "downside_wall_strength_usd": round(lower_wall_strength, 2),
+            "liquidity_sweep_risk": sweep_risk,
+            "narratives": narratives,
+        }
+
+    @staticmethod
+    def _parse_ics_events(ics_text: str) -> list[dict[str, str]]:
+        unfolded_lines: list[str] = []
+        for line in ics_text.splitlines():
+            if line.startswith((" ", "\t")) and unfolded_lines:
+                unfolded_lines[-1] += line[1:]
+            else:
+                unfolded_lines.append(line)
+
+        events: list[dict[str, str]] = []
+        current: dict[str, str] | None = None
+        for line in unfolded_lines:
+            if line == "BEGIN:VEVENT":
+                current = {}
+                continue
+            if line == "END:VEVENT":
+                if current:
+                    events.append(current)
+                current = None
+                continue
+            if current is None or ":" not in line:
+                continue
+            raw_key, value = line.split(":", 1)
+            key = raw_key.split(";", 1)[0]
+            current[raw_key] = value.strip()
+            current[key] = value.strip()
+        return events
+
+    def _parse_ics_start(self, raw_value: str | None) -> datetime | None:
+        if not raw_value:
+            return None
+        timezone_match = re.search(r"TZID=([^:;]+)", raw_value)
+        value = raw_value.split(":", 1)[-1]
+        if timezone_match:
+            return self._parse_named_timezone_datetime(value, timezone_match.group(1))
+        if value.endswith("Z"):
+            try:
+                return datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                return None
+        try:
+            return datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    def _parse_named_timezone_datetime(self, value: str, tz_name: str) -> datetime | None:
+        parsed_formats = ("%Y%m%dT%H%M%S", "%Y%m%dT%H%M")
+        naive: datetime | None = None
+        for fmt in parsed_formats:
+            with_timezone = value.split(":")[-1]
+            try:
+                naive = datetime.strptime(with_timezone, fmt)
+                break
+            except ValueError:
+                continue
+        if naive is None:
+            return None
+
+        timezone_candidates = [tz_name, "America/New_York" if tz_name == "US-Eastern" else tz_name]
+        for candidate in timezone_candidates:
+            try:
+                return naive.replace(tzinfo=ZoneInfo(candidate))
+            except ZoneInfoNotFoundError:
+                continue
+
+        fallback_offset = -4 if 3 <= naive.month <= 11 else -5
+        return naive.replace(tzinfo=timezone(timedelta(hours=fallback_offset)))
+
+    @staticmethod
+    def _parse_iso_datetime(raw_value: str | None) -> datetime | None:
+        if not raw_value:
+            return None
+        try:
+            return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_date_only(raw_value: Any) -> date | None:
+        if not raw_value:
+            return None
+        try:
+            return date.fromisoformat(str(raw_value))
+        except ValueError:
+            return None
+
+    def _parse_fomc_schedule_line(self, *, line: str, base_year: int) -> tuple[datetime | None, date | None]:
+        months_pattern = (
+            "January|February|March|April|May|June|July|August|September|October|November|December"
+        )
+        matches = list(re.finditer(rf"({months_pattern})\s+(\d{{1,2}})(?:,\s*(\d{{4}}))?", line))
+        if len(matches) < 2:
+            return None, None
+
+        start_month, start_day, start_year = matches[0].groups()
+        end_month, end_day, end_year = matches[1].groups()
+        meeting_start = datetime.strptime(
+            f"{start_month} {start_day} {start_year or base_year}",
+            "%B %d %Y",
+        ).date()
+        meeting_end = datetime.strptime(
+            f"{end_month} {end_day} {end_year or base_year}",
+            "%B %d %Y",
+        )
+        try:
+            eastern = ZoneInfo(NY_TZ)
+        except ZoneInfoNotFoundError:
+            eastern = timezone(timedelta(hours=-5))
+        scheduled_local = datetime.combine(meeting_end.date(), time(hour=14, minute=0), tzinfo=eastern)
+        return scheduled_local, meeting_start
+
+    @staticmethod
+    def _classify_bls_release(event_name: str) -> tuple[str, str]:
+        name = event_name.lower()
+        if "consumer price index" in name:
+            return "inflation", "very_high"
+        if "employment situation" in name:
+            return "employment", "very_high"
+        if "producer price index" in name or "import and export prices" in name:
+            return "inflation", "high"
+        if "job openings" in name or "jolts" in name:
+            return "labor_demand", "high"
+        if "employment cost index" in name or "productivity" in name:
+            return "labor_costs", "medium"
+        return "macro_release", "medium"
+
+    @staticmethod
+    def _classify_bea_release(event_name: str) -> tuple[str, str]:
+        name = event_name.lower()
+        if "gross domestic product" in name:
+            return "growth", "very_high"
+        if "personal income and outlays" in name:
+            return "consumption", "high"
+        if "trade" in name:
+            return "trade", "medium"
+        return "bea_release", "medium"
+
+    @staticmethod
+    def _classify_treasury_auction_importance(security_type: str, security_term: str) -> str:
+        combined = f"{security_term} {security_type}".lower()
+        if any(keyword in combined for keyword in ("20-year", "30-year", "bond", "10-year", "7-year", "5-year", "3-year", "note")):
+            return "medium"
+        if any(keyword in combined for keyword in ("17-week", "26-week", "52-week")):
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _dedupe_macro_events(events: list[_MacroEvent]) -> list[_MacroEvent]:
+        seen: set[tuple[Any, ...]] = set()
+        deduped: list[_MacroEvent] = []
+        for event in sorted(
+            events,
+            key=lambda item: (
+                item.scheduled_at_utc or datetime.max.replace(tzinfo=timezone.utc),
+                item.scheduled_date or date.max,
+                item.source,
+                item.event_name,
+            ),
+        ):
+            key = (
+                event.source,
+                event.event_name,
+                event.scheduled_at_utc.isoformat() if event.scheduled_at_utc else None,
+                event.scheduled_date.isoformat() if event.scheduled_date else None,
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(event)
+        return deduped
+
+    def _serialize_macro_event(self, event: _MacroEvent, *, now_utc: datetime) -> dict[str, Any]:
+        pre_event_hours, post_event_hours = self._event_risk_window_hours(event.importance)
+        starts_in_hours: float | None = None
+        is_within_next_8h = False
+        if event.scheduled_at_utc is not None:
+            starts_in_hours = round((event.scheduled_at_utc - now_utc).total_seconds() / 3600, 3)
+            is_within_next_8h = 0 <= starts_in_hours <= 8
+
+        payload = {
+            "source": event.source,
+            "event_name": event.event_name,
+            "category": event.category,
+            "importance": event.importance,
+            "time_precision": event.time_precision,
+            "scheduled_time_utc": event.scheduled_at_utc.replace(microsecond=0).isoformat() if event.scheduled_at_utc else None,
+            "scheduled_date": event.scheduled_date.isoformat() if event.scheduled_date else None,
+            "starts_in_hours": starts_in_hours,
+            "is_within_next_8h": is_within_next_8h,
+            "risk_window": {
+                "pre_event_hours": pre_event_hours,
+                "post_event_hours": post_event_hours,
+            },
+        }
+        if event.metadata:
+            payload["metadata"] = event.metadata
+        return payload
+
+    @staticmethod
+    def _event_risk_window_hours(importance: str) -> tuple[int, int]:
+        mapping = {
+            "very_high": (24, 8),
+            "high": (12, 4),
+            "medium": (8, 2),
+            "low": (4, 1),
+        }
+        return mapping.get(importance, (8, 2))
+
+    @staticmethod
+    def _highest_event_importance(events: list[dict[str, Any]]) -> str | None:
+        if not events:
+            return None
+        ranking = {"very_high": 4, "high": 3, "medium": 2, "low": 1}
+        top = max(events, key=lambda item: ranking.get(str(item.get("importance")), 0))
+        return top.get("importance")
 
     def get_sec_company_tickers(self, query: str | None = None, exchange: str | None = None, limit: int = 25) -> dict[str, Any]:
         payload = self._http.get_json(
@@ -2138,13 +2879,23 @@ class GatewayService:
     def _safe_float(value: Any) -> float | None:
         if value in (None, "", "-"):
             return None
-        return float(value)
+        if isinstance(value, str) and value.strip().lower() in {"null", "none", "nan", "n/a"}:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _safe_int(value: Any) -> int | None:
         if value in (None, "", "-"):
             return None
-        return int(float(value))
+        if isinstance(value, str) and value.strip().lower() in {"null", "none", "nan", "n/a"}:
+            return None
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _normalize_coinglass_pair_symbol(symbol: str) -> str:
@@ -2438,6 +3189,315 @@ class GatewayService:
             "focus_exchange_metrics": target,
             "top_open_interest_exchanges": top_rows,
         }
+
+    def _deribit_public_get(
+        self,
+        method: str,
+        *,
+        params: dict[str, Any],
+        ttl_seconds: int,
+    ) -> Any:
+        payload = self._http.get_json(
+            "deribit",
+            f"{DERIBIT_BASE}/public/{method}",
+            params=params,
+            ttl_seconds=ttl_seconds,
+        )
+        if not isinstance(payload, dict):
+            raise UpstreamServiceError("deribit", f"Deribit returned an unexpected payload for {method}.")
+        if payload.get("error"):
+            raise UpstreamServiceError("deribit", f"Deribit returned an error for {method}: {payload.get('error')}")
+        return payload.get("result")
+
+    def _build_deribit_option_summary(self, rows: list[Any]) -> dict[str, Any]:
+        parsed_rows = [self._normalize_deribit_option_row(row) for row in rows if isinstance(row, dict)]
+        parsed_rows = [row for row in parsed_rows if row is not None]
+        calls = [row for row in parsed_rows if row["option_type"] == "call"]
+        puts = [row for row in parsed_rows if row["option_type"] == "put"]
+
+        call_oi = sum(row.get("open_interest", 0.0) for row in calls)
+        put_oi = sum(row.get("open_interest", 0.0) for row in puts)
+        call_volume_usd = sum(row.get("volume_usd", 0.0) for row in calls)
+        put_volume_usd = sum(row.get("volume_usd", 0.0) for row in puts)
+
+        return {
+            "contracts": len(parsed_rows),
+            "call_open_interest": round(call_oi, 4),
+            "put_open_interest": round(put_oi, 4),
+            "put_call_open_interest_ratio": self._safe_ratio(put_oi, call_oi),
+            "call_volume_usd": round(call_volume_usd, 2),
+            "put_volume_usd": round(put_volume_usd, 2),
+            "put_call_volume_ratio": self._safe_ratio(put_volume_usd, call_volume_usd),
+            "oi_weighted_call_iv": self._weighted_average(calls, "mark_iv", "open_interest"),
+            "oi_weighted_put_iv": self._weighted_average(puts, "mark_iv", "open_interest"),
+            "volume_weighted_call_iv": self._weighted_average(calls, "mark_iv", "volume_usd"),
+            "volume_weighted_put_iv": self._weighted_average(puts, "mark_iv", "volume_usd"),
+            "atm_iv_skew": self._build_deribit_atm_iv_skew(parsed_rows),
+        }
+
+    def _build_deribit_nearest_expiry_summaries(self, rows: list[Any]) -> list[dict[str, Any]]:
+        parsed_rows = [self._normalize_deribit_option_row(row) for row in rows if isinstance(row, dict)]
+        parsed_rows = [row for row in parsed_rows if row is not None and row.get("expiry_date") is not None]
+        grouped: dict[date, list[dict[str, Any]]] = {}
+        for row in parsed_rows:
+            grouped.setdefault(row["expiry_date"], []).append(row)
+
+        today = datetime.now(timezone.utc).date()
+        summaries: list[dict[str, Any]] = []
+        for expiry_date in sorted(grouped):
+            expiry_rows = grouped[expiry_date]
+            days_to_expiry = (expiry_date - today).days
+            if days_to_expiry < 0:
+                continue
+            calls = [row for row in expiry_rows if row["option_type"] == "call"]
+            puts = [row for row in expiry_rows if row["option_type"] == "put"]
+            call_oi = sum(row.get("open_interest", 0.0) for row in calls)
+            put_oi = sum(row.get("open_interest", 0.0) for row in puts)
+            underlying_price = self._first_not_none(*(row.get("underlying_price") for row in expiry_rows))
+            atm_call = self._select_deribit_atm_option(calls, underlying_price)
+            atm_put = self._select_deribit_atm_option(puts, underlying_price)
+            summaries.append(
+                {
+                    "expiry_date": expiry_date.isoformat(),
+                    "days_to_expiry": days_to_expiry,
+                    "contracts": len(expiry_rows),
+                    "call_open_interest": round(call_oi, 4),
+                    "put_open_interest": round(put_oi, 4),
+                    "put_call_open_interest_ratio": self._safe_ratio(put_oi, call_oi),
+                    "total_volume_usd": round(sum(row.get("volume_usd", 0.0) for row in expiry_rows), 2),
+                    "atm_call_iv": atm_call.get("mark_iv") if atm_call else None,
+                    "atm_put_iv": atm_put.get("mark_iv") if atm_put else None,
+                    "atm_put_call_skew": None
+                    if not atm_call or not atm_put or atm_call.get("mark_iv") is None or atm_put.get("mark_iv") is None
+                    else round((atm_put["mark_iv"] - atm_call["mark_iv"]), 4),
+                    "atm_call_strike": atm_call.get("strike") if atm_call else None,
+                    "atm_put_strike": atm_put.get("strike") if atm_put else None,
+                    "underlying_price": underlying_price,
+                }
+            )
+        return summaries
+
+    def _build_deribit_futures_summary(self, rows: list[Any]) -> dict[str, Any]:
+        normalized_rows = [row for row in rows if isinstance(row, dict)]
+        perpetual = next((row for row in normalized_rows if str(row.get("instrument_name")) == "BTC-PERPETUAL"), None)
+        dated_futures = [row for row in normalized_rows if str(row.get("instrument_name")) != "BTC-PERPETUAL"]
+        nearest_future = None
+        if dated_futures:
+            nearest_future = min(
+                dated_futures,
+                key=lambda row: self._parse_deribit_future_expiry(row.get("instrument_name")) or datetime.max.date(),
+            )
+
+        perp_mark_price = self._safe_float(perpetual.get("mark_price")) if perpetual else None
+        perp_index_price = self._safe_float(perpetual.get("estimated_delivery_price")) if perpetual else None
+        nearest_future_mark = self._safe_float(nearest_future.get("mark_price")) if nearest_future else None
+        nearest_future_index = self._safe_float(nearest_future.get("estimated_delivery_price")) if nearest_future else None
+
+        return {
+            "perpetual": {
+                "instrument_name": perpetual.get("instrument_name") if perpetual else None,
+                "mark_price": perp_mark_price,
+                "index_price": perp_index_price,
+                "open_interest": self._safe_float(perpetual.get("open_interest")) if perpetual else None,
+                "volume_usd": self._safe_float(perpetual.get("volume_usd")) if perpetual else None,
+                "current_funding": self._safe_float(perpetual.get("current_funding")) if perpetual else None,
+                "funding_8h": self._safe_float(perpetual.get("funding_8h")) if perpetual else None,
+                "basis_pct": self._compute_change_pct(perp_index_price, perp_mark_price),
+            },
+            "nearest_future": {
+                "instrument_name": nearest_future.get("instrument_name") if nearest_future else None,
+                "expiry_date": (
+                    self._parse_deribit_future_expiry(nearest_future.get("instrument_name")).isoformat()
+                    if nearest_future and self._parse_deribit_future_expiry(nearest_future.get("instrument_name"))
+                    else None
+                ),
+                "mark_price": nearest_future_mark,
+                "index_price": nearest_future_index,
+                "open_interest": self._safe_float(nearest_future.get("open_interest")) if nearest_future else None,
+                "volume_usd": self._safe_float(nearest_future.get("volume_usd")) if nearest_future else None,
+                "basis_pct": self._compute_change_pct(nearest_future_index, nearest_future_mark),
+            },
+        }
+
+    def _build_deribit_historical_vol_summary(self, rows: list[Any]) -> dict[str, Any]:
+        normalized = []
+        for item in rows:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            timestamp = self._safe_int(item[0])
+            value = self._safe_float(item[1])
+            if timestamp is None or value is None:
+                continue
+            normalized.append({"timestamp": timestamp, "value": value})
+        if not normalized:
+            return {}
+        latest = normalized[-1]
+        previous = normalized[-2] if len(normalized) > 1 else None
+        return {
+            "latest_timestamp": latest["timestamp"],
+            "latest_value": latest["value"],
+            "previous_value": previous["value"] if previous else None,
+            "change_pct": self._compute_change_pct(previous["value"], latest["value"]) if previous else None,
+        }
+
+    def _build_deribit_vol_index_summary(self, rows: list[Any]) -> dict[str, Any]:
+        normalized = []
+        for item in rows:
+            if not isinstance(item, (list, tuple)) or len(item) < 5:
+                continue
+            timestamp = self._safe_int(item[0])
+            open_value = self._safe_float(item[1])
+            high_value = self._safe_float(item[2])
+            low_value = self._safe_float(item[3])
+            close_value = self._safe_float(item[4])
+            if timestamp is None or close_value is None:
+                continue
+            normalized.append(
+                {
+                    "timestamp": timestamp,
+                    "open": open_value,
+                    "high": high_value,
+                    "low": low_value,
+                    "close": close_value,
+                }
+            )
+        if not normalized:
+            return {}
+        latest = normalized[-1]
+        first = normalized[0]
+        high_24h = max(item["high"] for item in normalized if item["high"] is not None)
+        low_24h = min(item["low"] for item in normalized if item["low"] is not None)
+        return {
+            "latest_timestamp": latest["timestamp"],
+            "latest_value": latest["close"],
+            "change_24h_pct": self._compute_change_pct(first["open"], latest["close"]),
+            "high_24h": high_24h,
+            "low_24h": low_24h,
+        }
+
+    def _normalize_deribit_option_row(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        instrument_name = str(row.get("instrument_name") or "")
+        parsed = self._parse_deribit_option_instrument(instrument_name)
+        if parsed is None:
+            return None
+        return {
+            "instrument_name": instrument_name,
+            "expiry_date": parsed["expiry_date"],
+            "strike": parsed["strike"],
+            "option_type": parsed["option_type"],
+            "open_interest": self._safe_float(row.get("open_interest")) or 0.0,
+            "volume_usd": self._safe_float(row.get("volume_usd")) or 0.0,
+            "mark_iv": self._safe_float(row.get("mark_iv")),
+            "underlying_price": self._safe_float(row.get("underlying_price")),
+        }
+
+    def _build_deribit_atm_iv_skew(self, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        valid_rows = [row for row in rows if row.get("expiry_date") is not None]
+        if not valid_rows:
+            return None
+        today = datetime.now(timezone.utc).date()
+        grouped: dict[date, list[dict[str, Any]]] = {}
+        for row in valid_rows:
+            expiry_date = row.get("expiry_date")
+            if not isinstance(expiry_date, date) or expiry_date < today:
+                continue
+            grouped.setdefault(expiry_date, []).append(row)
+        if not grouped:
+            return None
+        nearest_expiry = min(grouped)
+        expiry_rows = grouped[nearest_expiry]
+        calls = [row for row in expiry_rows if row["option_type"] == "call"]
+        puts = [row for row in expiry_rows if row["option_type"] == "put"]
+        underlying_price = self._first_not_none(*(row.get("underlying_price") for row in expiry_rows))
+        atm_call = self._select_deribit_atm_option(calls, underlying_price)
+        atm_put = self._select_deribit_atm_option(puts, underlying_price)
+        if not atm_call or not atm_put:
+            return None
+        call_iv = atm_call.get("mark_iv")
+        put_iv = atm_put.get("mark_iv")
+        return {
+            "expiry_date": nearest_expiry.isoformat(),
+            "underlying_price": underlying_price,
+            "atm_call_instrument": atm_call.get("instrument_name"),
+            "atm_put_instrument": atm_put.get("instrument_name"),
+            "atm_call_iv": call_iv,
+            "atm_put_iv": put_iv,
+            "atm_put_call_skew": None if call_iv is None or put_iv is None else round(put_iv - call_iv, 4),
+        }
+
+    @staticmethod
+    def _select_deribit_atm_option(rows: list[dict[str, Any]], underlying_price: float | None) -> dict[str, Any] | None:
+        if not rows or underlying_price in (None, 0):
+            return None
+        eligible = [row for row in rows if row.get("strike") is not None]
+        if not eligible:
+            return None
+        return min(
+            eligible,
+            key=lambda row: (
+                abs((row["strike"] - underlying_price) / underlying_price),
+                -(row.get("open_interest", 0.0) or 0.0),
+            ),
+        )
+
+    @staticmethod
+    def _parse_deribit_option_instrument(instrument_name: str) -> dict[str, Any] | None:
+        match = re.match(r"^(?P<currency>[A-Z]+)-(?P<expiry>\d{1,2}[A-Z]{3}\d{2})-(?P<strike>\d+)-(?P<option_type>[CP])$", instrument_name)
+        if not match:
+            return None
+        expiry_date = GatewayService._parse_deribit_expiry_code(match.group("expiry"))
+        if expiry_date is None:
+            return None
+        option_type = "call" if match.group("option_type") == "C" else "put"
+        return {
+            "currency": match.group("currency"),
+            "expiry_date": expiry_date,
+            "strike": float(match.group("strike")),
+            "option_type": option_type,
+        }
+
+    @staticmethod
+    def _parse_deribit_future_expiry(instrument_name: Any) -> date | None:
+        value = str(instrument_name or "")
+        match = re.match(r"^[A-Z]+-(?P<expiry>\d{1,2}[A-Z]{3}\d{2})$", value)
+        if not match:
+            return None
+        return GatewayService._parse_deribit_expiry_code(match.group("expiry"))
+
+    @staticmethod
+    def _parse_deribit_expiry_code(code: str) -> date | None:
+        try:
+            return datetime.strptime(code, "%d%b%y").date()
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _weighted_average(rows: list[dict[str, Any]], value_key: str, weight_key: str) -> float | None:
+        weighted_sum = 0.0
+        total_weight = 0.0
+        for row in rows:
+            value = GatewayService._safe_float(row.get(value_key))
+            weight = GatewayService._safe_float(row.get(weight_key))
+            if value is None or weight in (None, 0):
+                continue
+            weighted_sum += value * weight
+            total_weight += weight
+        if total_weight == 0:
+            return None
+        return round(weighted_sum / total_weight, 4)
+
+    @staticmethod
+    def _safe_ratio(numerator: float | None, denominator: float | None) -> float | None:
+        if numerator is None or denominator in (None, 0):
+            return None
+        return round(numerator / denominator, 4)
+
+    @staticmethod
+    def _first_not_none(*values: Any) -> Any:
+        for value in values:
+            if value is not None:
+                return value
+        return None
 
     @staticmethod
     def _normalize_rows(rows: Any) -> list[dict[str, Any]]:

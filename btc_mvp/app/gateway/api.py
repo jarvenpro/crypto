@@ -203,6 +203,20 @@ def macro_overview(
     return service.macro_overview(series_ids)
 
 
+@protected.get(
+    "/v1/macro/event-calendar",
+    tags=["Overview"],
+    summary="Get the official macro event calendar for the next few days",
+    description="Returns upcoming official BLS, BEA, FOMC, and Treasury calendar events for macro risk timing. Use this when an 8-12h BTC judgment may be sensitive to scheduled event risk.",
+)
+def macro_event_calendar(
+    horizon_hours: int = Query(72, ge=8, le=336, description="How many forward hours of official event risk to include."),
+    major_only: bool = Query(True, description="When true, filter out lower-importance items such as short-bill Treasury auctions."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_macro_event_calendar(horizon_hours=horizon_hours, major_only=major_only)
+
+
 @protected.get("/v1/regulatory/overview", tags=["Overview"], summary="Get a compact regulatory overview for GPT")
 def regulatory_overview(
     entities: str = Query(
@@ -264,6 +278,54 @@ def bybit_market_structure(
     return service.get_bybit_market_structure(symbol.upper())
 
 
+@protected.get(
+    "/v1/sources/liquidity/summary",
+    tags=["Sources"],
+    summary="Get a cross-exchange BTC liquidity summary",
+    description="Returns a free orderbook-based liquidity map across OKX, Bybit, and optionally Binance. It is the free substitute for a commercial heatmap or liquidation map when doing 8-12h BTC analysis.",
+)
+def liquidity_summary(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    depth_limit: int = Query(100, ge=50, le=500, description="Requested orderbook depth. Each exchange uses the nearest supported depth."),
+    include_binance: bool = Query(False, description="When true, include Binance orderbook data. Disabled by default because Binance is more likely to rate-limit."),
+    include_okx: bool = Query(True, description="Include OKX orderbook data."),
+    include_bybit: bool = Query(True, description="Include Bybit orderbook data."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_liquidity_summary(
+        symbol=symbol.upper(),
+        depth_limit=depth_limit,
+        include_binance=include_binance,
+        include_okx=include_okx,
+        include_bybit=include_bybit,
+    )
+
+
+@protected.get(
+    "/v1/sources/liquidity/context",
+    tags=["Sources"],
+    summary="Get a sampled BTC liquidity and liquidation context",
+    description="Returns a higher-accuracy liquidity context using live liquidation sampling plus current orderbook structure across OKX, Bybit, and optionally Binance. Use this for final 8-12h BTC judgment when you want more than a static snapshot.",
+)
+def liquidity_context(
+    symbol: str = Query("BTCUSDT", description="Trading symbol such as BTCUSDT."),
+    depth_limit: int = Query(100, ge=50, le=500, description="Requested orderbook depth. Each exchange uses the nearest supported depth."),
+    liquidation_sample_seconds: int = Query(4, ge=2, le=8, description="How many seconds to sample live liquidation streams."),
+    include_binance: bool = Query(False, description="When true, include Binance orderbook and liquidation sampling. Disabled by default because Binance is more likely to rate-limit."),
+    include_okx: bool = Query(True, description="Include OKX orderbook data."),
+    include_bybit: bool = Query(True, description="Include Bybit orderbook and liquidation sampling."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_liquidity_context(
+        symbol=symbol.upper(),
+        depth_limit=depth_limit,
+        liquidation_sample_seconds=liquidation_sample_seconds,
+        include_binance=include_binance,
+        include_okx=include_okx,
+        include_bybit=include_bybit,
+    )
+
+
 @protected.get("/v1/sources/coingecko/simple-price", tags=["Sources"], summary="Get CoinGecko simple price data")
 def coingecko_simple_price(
     asset_id: str = Query("bitcoin", description="CoinGecko asset ID, for example bitcoin."),
@@ -271,6 +333,19 @@ def coingecko_simple_price(
     service: GatewayService = Depends(get_gateway_service),
 ) -> dict:
     return service.get_coingecko_simple_price(asset_id=asset_id, vs_currency=vs_currency)
+
+
+@protected.get(
+    "/v1/sources/deribit/options-context",
+    tags=["Sources"],
+    summary="Get Deribit BTC options and IV context",
+    description="Returns Deribit BTC options, futures, historical volatility, and volatility-index context. Use it as the options and implied-volatility layer for final 8-12h BTC judgment.",
+)
+def deribit_options_context(
+    currency: str = Query("BTC", description="Base currency on Deribit, usually BTC."),
+    service: GatewayService = Depends(get_gateway_service),
+) -> dict:
+    return service.get_deribit_options_context(currency=currency.upper())
 
 
 @protected.get("/v1/sources/coinglass/market-structure", tags=["Sources"], summary="Get CoinGlass derivatives structure snapshot", include_in_schema=False)
