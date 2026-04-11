@@ -97,11 +97,6 @@ class GatewayService:
             okx_derivatives_future = executor.submit(self._capture, lambda: self.get_okx_derivatives_overview(symbol))
             bybit_future = executor.submit(self._capture, lambda: self.get_bybit_market_structure(symbol))
             fear_greed_future = executor.submit(self._capture, self.get_fear_greed_latest)
-            mempool_future = (
-                executor.submit(self._capture, self.get_mempool_recommended_fees)
-                if root_symbol == "BTC"
-                else None
-            )
             coingecko_future = (
                 executor.submit(self._capture, lambda: self.get_coingecko_simple_price(coingecko_id))
                 if coingecko_id
@@ -121,11 +116,6 @@ class GatewayService:
             okx_derivatives = okx_derivatives_future.result()
             bybit = bybit_future.result()
             fear_greed = fear_greed_future.result()
-            mempool = (
-                mempool_future.result()
-                if mempool_future is not None
-                else self._skipped("Mempool data is only mapped for BTC.")
-            )
             coingecko = (
                 coingecko_future.result()
                 if coingecko_future is not None
@@ -142,7 +132,7 @@ class GatewayService:
                 "okx_derivatives": okx_derivatives,
                 "bybit": bybit,
                 "fear_greed": fear_greed,
-                "mempool": mempool,
+                "mempool": self._skipped("Excluded from default overview to keep the endpoint fast and stable. Call /v1/sources/mempool/fees separately when needed."),
             },
         }
 
