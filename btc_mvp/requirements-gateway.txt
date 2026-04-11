@@ -1,3 +1,5 @@
 fastapi>=0.115
 httpx>=0.28
 uvicorn>=0.32
+fastmcp>=2.3
+websockets>=15.0
