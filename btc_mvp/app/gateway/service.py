@@ -13,6 +13,7 @@ from app.gateway.http import GatewayHttpClient, UpstreamServiceError
 
 BINANCE_SPOT_BASE = "https://api.binance.com"
 BINANCE_FUTURES_BASE = "https://fapi.binance.com"
+OKX_BASE = "https://www.okx.com"
 TREASURY_BASE = "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od"
 BLS_BASE = "https://api.bls.gov/publicAPI/v2/timeseries/data"
 FRED_BASE = "https://api.stlouisfed.org/fred"
@@ -71,6 +72,7 @@ class GatewayService:
                 "cftc": True,
                 "fed_rss": True,
                 "binance": True,
+                "okx": True,
                 "mempool": True,
                 "fear_greed": True,
                 "treasury": True,
@@ -84,18 +86,18 @@ class GatewayService:
     def _build_crypto_overview(self, symbol: str) -> dict[str, Any]:
         root_symbol = self._extract_root_asset(symbol)
         coingecko_id = COINGECKO_IDS.get(root_symbol)
-        binance_market = self._capture(lambda: self.get_binance_market_overview(symbol))
-        spot_price = None
-        if binance_market.get("ok"):
-            spot_price = binance_market.get("data", {}).get("spot_price")
+        okx_market = self._capture(lambda: self.get_okx_market_overview(symbol))
+        reference_price = None
+        if okx_market.get("ok"):
+            reference_price = okx_market.get("data", {}).get("last_price")
 
         payload = {
             "generated_at": utc_now_iso(),
             "symbol": symbol,
             "sources": {
-                "binance": binance_market,
-                "binance_structure": self._capture(lambda: self.get_binance_multi_timeframe_overview(symbol, spot_price=spot_price)),
-                "binance_derivatives": self._capture(lambda: self.get_binance_derivatives_overview(symbol)),
+                "okx": okx_market,
+                "okx_structure": self._capture(lambda: self.get_okx_multi_timeframe_overview(symbol, reference_price=reference_price)),
+                "okx_derivatives": self._capture(lambda: self.get_okx_derivatives_overview(symbol)),
                 "bybit": self._capture(lambda: self.get_bybit_market_structure(symbol)),
                 "fear_greed": self._capture(self.get_fear_greed_latest),
                 "mempool": self._capture(self.get_mempool_recommended_fees) if root_symbol == "BTC" else self._skipped("Mempool data is only mapped for BTC."),
@@ -212,6 +214,253 @@ class GatewayService:
             "sources": {
                 "cftc": self._capture(self.get_cftc_bitcoin_cot),
                 "sec": self._capture(lambda: self.get_sec_recent_filings_for_entities(sec_entities)),
+            },
+        }
+
+    def get_okx_market_overview(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        symbol = symbol.upper()
+        return self._memoize(
+            f"okx_market_overview:{symbol}",
+            ttl_seconds=30,
+            stale_if_error_seconds=180,
+            builder=lambda: self._build_okx_market_overview(symbol),
+        )
+
+    def _build_okx_market_overview(self, symbol: str = "BTCUSDT") -> dict[str, Any]:
+        symbol = symbol.upper()
+        swap_inst_id = self._to_okx_swap_inst_id(symbol)
+        index_inst_id = self._to_okx_index_inst_id(symbol)
+
+        ticker = self._okx_get_first_row(
+            "/api/v5/market/ticker",
+            params={"instId": swap_inst_id},
+            ttl_seconds=20,
+        )
+        mark_price_row = self._okx_get_first_row(
+            "/api/v5/public/mark-price",
+            params={"instType": "SWAP", "instId": swap_inst_id},
+            ttl_seconds=20,
+        )
+        index_ticker = self._okx_get_first_row(
+            "/api/v5/market/index-tickers",
+            params={"instId": index_inst_id},
+            ttl_seconds=20,
+        )
+
+        last_price = self._safe_float(ticker.get("last"))
+        open_24h = self._safe_float(ticker.get("open24h"))
+        mark_price = self._safe_float(mark_price_row.get("markPx"))
+        index_price = self._safe_float(index_ticker.get("idxPx"))
+
+        return {
+            "symbol": symbol,
+            "exchange": "OKX",
+            "inst_id": swap_inst_id,
+            "index_inst_id": index_inst_id,
+            "last_price": last_price,
+            "book_ticker": {
+                "bid_price": self._safe_float(ticker.get("bidPx")),
+                "ask_price": self._safe_float(ticker.get("askPx")),
+                "bid_qty": self._safe_float(ticker.get("bidSz")),
+                "ask_qty": self._safe_float(ticker.get("askSz")),
+            },
+            "ticker_24h": {
+                "price_change_pct": self._compute_change_pct(open_24h, last_price),
+                "open_price": open_24h,
+                "high_price": self._safe_float(ticker.get("high24h")),
+                "low_price": self._safe_float(ticker.get("low24h")),
+                "volume": self._safe_float(ticker.get("vol24h")),
+                "base_volume": self._safe_float(ticker.get("volCcy24h")),
+            },
+            "mark_price": mark_price,
+            "index_price": index_price,
+            "mark_index_spread": self._mark_index_spread(mark_price, index_price),
+            "swap_index_basis": None if last_price is None or index_price is None else round(last_price - index_price, 6),
+            "swap_index_basis_pct": self._pct_of_value(None if last_price is None or index_price is None else round(last_price - index_price, 6), index_price),
+        }
+
+    def get_okx_multi_timeframe_overview(self, symbol: str = "BTCUSDT", reference_price: float | None = None) -> dict[str, Any]:
+        symbol = symbol.upper()
+        cache_key = f"okx_multi_timeframe_overview:{symbol}:{reference_price if reference_price is not None else 'na'}"
+        return self._memoize(
+            cache_key,
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
+            builder=lambda: self._build_okx_multi_timeframe_overview(symbol, reference_price=reference_price),
+        )
+
+    def _build_okx_multi_timeframe_overview(self, symbol: str = "BTCUSDT", reference_price: float | None = None) -> dict[str, Any]:
+        symbol = symbol.upper()
+        swap_inst_id = self._to_okx_swap_inst_id(symbol)
+        if reference_price is None:
+            market = self.get_okx_market_overview(symbol)
+            reference_price = market.get("last_price")
+
+        interval_limits = {
+            "1h": 24,
+            "4h": 18,
+            "1d": 30,
+            "1w": 24,
+            "1M": 12,
+        }
+
+        timeframe_candles: dict[str, list[dict[str, Any]]] = {}
+        for interval, limit in interval_limits.items():
+            rows = self._okx_get_rows(
+                "/api/v5/market/candles",
+                params={"instId": swap_inst_id, "bar": self._to_okx_bar(interval), "limit": limit},
+                ttl_seconds=self._okx_kline_ttl(interval),
+            )
+            timeframe_candles[interval] = self._normalize_okx_candle_rows(rows)
+
+        derived_levels = self._build_multi_timeframe_levels(timeframe_candles)
+        support_resistance = self._build_support_resistance_levels(timeframe_candles, reference_price)
+        fibonacci_levels = self._build_multi_timeframe_fibonacci_levels(timeframe_candles)
+
+        return {
+            "symbol": symbol,
+            "exchange": "OKX",
+            "inst_id": swap_inst_id,
+            "reference_price": reference_price,
+            "timeframes": {
+                interval: {
+                    "summary": self._build_candle_structure_summary(candles),
+                }
+                for interval, candles in timeframe_candles.items()
+            },
+            "derived_levels": derived_levels,
+            "support_resistance": support_resistance,
+            "fibonacci_levels": fibonacci_levels,
+        }
+
+    def get_okx_derivatives_overview(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 8) -> dict[str, Any]:
+        symbol = symbol.upper()
+        period = period.lower()
+        return self._memoize(
+            f"okx_derivatives_overview:{symbol}:{period}:{limit}",
+            ttl_seconds=120,
+            stale_if_error_seconds=900,
+            builder=lambda: self._build_okx_derivatives_overview(symbol, period=period, limit=limit),
+        )
+
+    def _build_okx_derivatives_overview(self, symbol: str = "BTCUSDT", period: str = "1h", limit: int = 8) -> dict[str, Any]:
+        symbol = symbol.upper()
+        swap_inst_id = self._to_okx_swap_inst_id(symbol)
+        index_inst_id = self._to_okx_index_inst_id(symbol)
+        okx_period = self._to_okx_period(period)
+        root_asset = self._extract_root_asset(symbol)
+
+        ticker = self._okx_get_first_row(
+            "/api/v5/market/ticker",
+            params={"instId": swap_inst_id},
+            ttl_seconds=20,
+        )
+        mark_price_row = self._okx_get_first_row(
+            "/api/v5/public/mark-price",
+            params={"instType": "SWAP", "instId": swap_inst_id},
+            ttl_seconds=20,
+        )
+        index_ticker = self._okx_get_first_row(
+            "/api/v5/market/index-tickers",
+            params={"instId": index_inst_id},
+            ttl_seconds=20,
+        )
+        funding_current = self._okx_get_first_row(
+            "/api/v5/public/funding-rate",
+            params={"instId": swap_inst_id},
+            ttl_seconds=30,
+        )
+        funding_history = self._normalize_okx_funding_rows(
+            self._okx_get_rows(
+                "/api/v5/public/funding-rate-history",
+                params={"instId": swap_inst_id, "limit": limit},
+                ttl_seconds=60,
+            )
+        )
+        open_interest_history = self._normalize_okx_open_interest_rows(
+            self._okx_get_rows(
+                "/api/v5/rubik/stat/contracts/open-interest-volume",
+                params={"ccy": root_asset, "period": okx_period},
+                ttl_seconds=60,
+            )
+        )
+        long_short_history = self._normalize_okx_long_short_ratio_rows(
+            self._okx_get_rows(
+                "/api/v5/rubik/stat/contracts/long-short-account-ratio",
+                params={"ccy": root_asset, "period": okx_period},
+                ttl_seconds=60,
+            )
+        )
+        open_interest_current = self._okx_get_first_row(
+            "/api/v5/public/open-interest",
+            params={"instType": "SWAP", "instId": swap_inst_id},
+            ttl_seconds=30,
+        )
+
+        last_price = self._safe_float(ticker.get("last"))
+        mark_price = self._safe_float(mark_price_row.get("markPx"))
+        index_price = self._safe_float(index_ticker.get("idxPx"))
+        swap_index_basis = None if last_price is None or index_price is None else round(last_price - index_price, 6)
+        swap_index_basis_pct = self._pct_of_value(swap_index_basis, index_price)
+        if swap_index_basis is None:
+            basis_state = None
+        elif swap_index_basis > 0:
+            basis_state = "contango"
+        elif swap_index_basis < 0:
+            basis_state = "backwardation"
+        else:
+            basis_state = "flat"
+
+        funding_summary = self._build_ohlc_summary(funding_history, value_key_candidates=("fundingRate", "value", "close"))
+        open_interest_summary = self._build_ohlc_summary(open_interest_history, value_key_candidates=("sumOpenInterestValue", "value", "close"))
+        if open_interest_summary is not None:
+            open_interest_summary["latest_open_interest"] = self._safe_float(open_interest_current.get("oi"))
+            open_interest_summary["latest_open_interest_value"] = self._safe_float(open_interest_current.get("oiUsd"))
+        long_short_summary = self._build_ohlc_summary(long_short_history, value_key_candidates=("longShortRatio", "value", "close"))
+
+        basis_summary = {
+            "latest_basis": swap_index_basis,
+            "latest_basis_rate": swap_index_basis_pct,
+            "premium_rate": self._safe_float(funding_current.get("premium")),
+            "latest_funding_rate": self._safe_float(funding_current.get("fundingRate")),
+            "state": basis_state,
+        }
+
+        return {
+            "symbol": symbol,
+            "exchange": "OKX",
+            "inst_id": swap_inst_id,
+            "current": {
+                "last_price": last_price,
+                "mark_price": mark_price,
+                "index_price": index_price,
+                "last_funding_rate": self._safe_float(funding_current.get("fundingRate")),
+                "interest_rate": self._safe_float(funding_current.get("interestRate")),
+                "premium_rate": self._safe_float(funding_current.get("premium")),
+                "next_funding_time": funding_current.get("nextFundingTime"),
+                "mark_index_spread": self._mark_index_spread(mark_price, index_price),
+                "mark_index_spread_pct": self._pct_of_value(self._mark_index_spread(mark_price, index_price), index_price),
+                "open_interest": self._safe_float(open_interest_current.get("oi")),
+                "open_interest_usd": self._safe_float(open_interest_current.get("oiUsd")),
+            },
+            "summary": {
+                "basis": basis_summary,
+                "open_interest": open_interest_summary,
+                "global_long_short_ratio": long_short_summary,
+                "funding_rate": funding_summary,
+                "composite_view": self._build_binance_derivatives_composite_view(
+                    basis_summary=basis_summary,
+                    open_interest_summary=open_interest_summary,
+                    top_position_summary=None,
+                    top_account_summary=None,
+                    global_ratio_summary=long_short_summary,
+                    taker_volume_summary=None,
+                ),
+            },
+            "raw": {
+                "funding_rate_history": funding_history[-8:],
+                "open_interest_history": open_interest_history[-8:],
+                "long_short_ratio_history": long_short_history[-8:],
             },
         }
 
@@ -1875,6 +2124,27 @@ class GatewayService:
         return sorted(normalized, key=lambda row: row["open_time"])
 
     @staticmethod
+    def _normalize_okx_candle_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, list) or len(item) < 8:
+                continue
+            normalized.append(
+                {
+                    "open_time": datetime.fromtimestamp(int(item[0]) / 1000, tz=timezone.utc).replace(microsecond=0).isoformat(),
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                    "base_volume": float(item[6]),
+                    "quote_volume": float(item[7]),
+                    "confirm": str(item[8]) if len(item) > 8 else None,
+                }
+            )
+        return sorted(normalized, key=lambda row: row["open_time"])
+
+    @staticmethod
     def _normalize_bybit_open_interest_rows(rows: list[Any]) -> list[dict[str, Any]]:
         normalized: list[dict[str, Any]] = []
         for item in rows:
@@ -1889,6 +2159,63 @@ class GatewayService:
                     "value": value,
                     "close": value,
                     "openInterest": value,
+                }
+            )
+        return sorted(normalized, key=lambda row: str(row.get("time") or ""))
+
+    @staticmethod
+    def _normalize_okx_funding_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            value = GatewayService._safe_float(item.get("fundingRate"))
+            if value is None:
+                continue
+            normalized.append(
+                {
+                    "time": item.get("fundingTime"),
+                    "value": value,
+                    "close": value,
+                    "fundingRate": value,
+                }
+            )
+        return sorted(normalized, key=lambda row: str(row.get("time") or ""))
+
+    @staticmethod
+    def _normalize_okx_open_interest_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            value = GatewayService._safe_float(item[1])
+            if value is None:
+                continue
+            normalized.append(
+                {
+                    "time": item[0],
+                    "sumOpenInterestValue": value,
+                    "value": value,
+                    "close": value,
+                }
+            )
+        return sorted(normalized, key=lambda row: str(row.get("time") or ""))
+
+    @staticmethod
+    def _normalize_okx_long_short_ratio_rows(rows: list[Any]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for item in rows:
+            if not isinstance(item, list) or len(item) < 2:
+                continue
+            value = GatewayService._safe_float(item[1])
+            if value is None:
+                continue
+            normalized.append(
+                {
+                    "time": item[0],
+                    "longShortRatio": value,
+                    "value": value,
+                    "close": value,
                 }
             )
         return sorted(normalized, key=lambda row: str(row.get("time") or ""))
@@ -2233,3 +2560,87 @@ class GatewayService:
         if node is None or node.text is None:
             return None
         return node.text.strip()
+
+    def _okx_get_rows(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any],
+        ttl_seconds: int,
+    ) -> list[Any]:
+        payload = self._http.get_json(
+            "okx",
+            f"{OKX_BASE}{path}",
+            params=params,
+            ttl_seconds=ttl_seconds,
+        )
+        code = str(payload.get("code") or "")
+        if code not in {"", "0"}:
+            raise UpstreamServiceError("okx", f"OKX returned error code {code}: {payload.get('msg') or 'unknown error'}")
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise UpstreamServiceError("okx", f"OKX returned unexpected payload for {path}.")
+        return rows
+
+    def _okx_get_first_row(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any],
+        ttl_seconds: int,
+    ) -> dict[str, Any]:
+        rows = self._okx_get_rows(path, params=params, ttl_seconds=ttl_seconds)
+        if not rows or not isinstance(rows[0], dict):
+            raise UpstreamServiceError("okx", f"OKX returned no data for {path}.")
+        return rows[0]
+
+    @staticmethod
+    def _to_okx_swap_inst_id(symbol: str) -> str:
+        root = GatewayService._extract_root_asset(symbol)
+        return f"{root}-USDT-SWAP"
+
+    @staticmethod
+    def _to_okx_index_inst_id(symbol: str) -> str:
+        root = GatewayService._extract_root_asset(symbol)
+        return f"{root}-USDT"
+
+    @staticmethod
+    def _to_okx_bar(interval: str) -> str:
+        mapping = {
+            "15m": "15m",
+            "1h": "1H",
+            "4h": "4H",
+            "8h": "8H",
+            "1d": "1D",
+            "1w": "1W",
+            "1m": "1M",
+            "1M": "1M",
+        }
+        return mapping.get(interval, interval)
+
+    @staticmethod
+    def _to_okx_period(period: str) -> str:
+        mapping = {
+            "5m": "5m",
+            "15m": "15m",
+            "30m": "30m",
+            "1h": "1H",
+            "2h": "2H",
+            "4h": "4H",
+            "6h": "6H",
+            "12h": "12H",
+            "1d": "1D",
+        }
+        return mapping.get(period.lower(), "1H")
+
+    @staticmethod
+    def _okx_kline_ttl(interval: str) -> int:
+        return {
+            "15m": 60,
+            "1h": 120,
+            "4h": 300,
+            "8h": 600,
+            "1d": 1800,
+            "1w": 3600,
+            "1M": 7200,
+        }.get(interval, 120)

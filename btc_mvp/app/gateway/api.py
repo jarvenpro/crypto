@@ -141,7 +141,7 @@ def health(service: GatewayService = Depends(get_gateway_service)) -> dict:
     "/v1/crypto/overview",
     tags=["Overview"],
     summary="Get a compact crypto market overview for GPT",
-    description="Quick triage endpoint for BTC direction. Use it first for a compact market snapshot, but for any final 8-12h judgment also call Binance multi-timeframe structure and Binance derivatives structure.",
+    description="Quick triage endpoint for BTC direction. Uses OKX-first market and derivatives context with Bybit as secondary validation. Use it first for a compact market snapshot, but do not treat it as the final 8-12h judgment.",
 )
 def crypto_overview(
     symbol: str = Query("BTCUSDT", description="Binance symbol such as BTCUSDT."),
