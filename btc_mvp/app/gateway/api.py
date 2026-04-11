@@ -140,6 +140,7 @@ def health(service: GatewayService = Depends(get_gateway_service)) -> dict:
 @protected.get(
     "/v1/crypto/overview",
     tags=["Overview"],
+    operation_id="getCryptoOverview",
     summary="Get a compact crypto market overview for GPT",
     description="Quick triage endpoint for BTC direction. Uses OKX-first market and derivatives context with Bybit as secondary validation. Use it first for a compact market snapshot, but do not treat it as the final 8-12h judgment.",
 )
@@ -191,7 +192,12 @@ def debug_okx_derivatives_overview(
     return service.get_okx_derivatives_overview(symbol.upper(), period=period, limit=limit)
 
 
-@protected.get("/v1/macro/overview", tags=["Overview"], summary="Get a compact macro overview for GPT")
+@protected.get(
+    "/v1/macro/overview",
+    tags=["Overview"],
+    operation_id="getMacroOverview",
+    summary="Get a compact macro overview for GPT",
+)
 def macro_overview(
     fred_series: str = Query(
         "FEDFUNDS,DGS10,UNRATE",
@@ -206,6 +212,7 @@ def macro_overview(
 @protected.get(
     "/v1/macro/event-calendar",
     tags=["Overview"],
+    operation_id="getMacroEventCalendar",
     summary="Get the official macro event calendar for the next few days",
     description="Returns upcoming official BLS, BEA, FOMC, and Treasury calendar events for macro risk timing. Use this when an 8-12h BTC judgment may be sensitive to scheduled event risk.",
 )
@@ -217,7 +224,12 @@ def macro_event_calendar(
     return service.get_macro_event_calendar(horizon_hours=horizon_hours, major_only=major_only)
 
 
-@protected.get("/v1/regulatory/overview", tags=["Overview"], summary="Get a compact regulatory overview for GPT")
+@protected.get(
+    "/v1/regulatory/overview",
+    tags=["Overview"],
+    operation_id="getRegulatoryOverview",
+    summary="Get a compact regulatory overview for GPT",
+)
 def regulatory_overview(
     entities: str = Query(
         "IBIT,FBTC,GBTC",
@@ -229,7 +241,12 @@ def regulatory_overview(
     return service.regulatory_overview(entity_list)
 
 
-@protected.get("/v1/sources/binance/market", tags=["Sources"], summary="Get Binance spot and futures snapshot")
+@protected.get(
+    "/v1/sources/binance/market",
+    tags=["Sources"],
+    operation_id="getBinanceMarket",
+    summary="Get Binance spot and futures snapshot",
+)
 def binance_market(
     symbol: str = Query("BTCUSDT", description="Binance symbol such as BTCUSDT."),
     service: GatewayService = Depends(get_gateway_service),
@@ -240,6 +257,7 @@ def binance_market(
 @protected.get(
     "/v1/sources/binance/derivatives-structure",
     tags=["Sources"],
+    operation_id="getBinanceDerivativesStructure",
     summary="Get Binance derivatives structure",
     description="Required depth endpoint for final 8-12h BTC judgment. Returns mark-index spread, basis, open interest history, top trader ratios, global long-short ratio, and taker buy-sell volume.",
 )
@@ -255,6 +273,7 @@ def binance_derivatives_structure(
 @protected.get(
     "/v1/sources/binance/multi-timeframe-structure",
     tags=["Sources"],
+    operation_id="getBinanceMultiTimeframeStructure",
     summary="Get Binance multi-timeframe structure",
     description="Required depth endpoint for final 8-12h BTC judgment. Returns 15m, 1h, 4h, 8h, 1d, 1w, and 1M structure with range levels, support/resistance, Fibonacci, ATR-like volatility, VWAP approximation, and raw candles.",
 )
@@ -268,6 +287,7 @@ def binance_multi_timeframe_structure(
 @protected.get(
     "/v1/sources/bybit/market-structure",
     tags=["Sources"],
+    operation_id="getBybitMarketStructure",
     summary="Get Bybit derivatives validation snapshot",
     description="Secondary validation endpoint for 8-12h BTC judgment and fallback when Binance is temporarily rate-limited.",
 )
@@ -281,6 +301,7 @@ def bybit_market_structure(
 @protected.get(
     "/v1/sources/liquidity/summary",
     tags=["Sources"],
+    operation_id="getLiquiditySummary",
     summary="Get a cross-exchange BTC liquidity summary",
     description="Returns a free orderbook-based liquidity map across OKX, Bybit, and optionally Binance. It is the free substitute for a commercial heatmap or liquidation map when doing 8-12h BTC analysis.",
 )
@@ -304,6 +325,7 @@ def liquidity_summary(
 @protected.get(
     "/v1/sources/liquidity/context",
     tags=["Sources"],
+    operation_id="getLiquidityContext",
     summary="Get a sampled BTC liquidity and liquidation context",
     description="Returns a higher-accuracy liquidity context using live liquidation sampling plus current orderbook structure across OKX, Bybit, and optionally Binance. Use this for final 8-12h BTC judgment when you want more than a static snapshot.",
 )
@@ -326,7 +348,12 @@ def liquidity_context(
     )
 
 
-@protected.get("/v1/sources/coingecko/simple-price", tags=["Sources"], summary="Get CoinGecko simple price data")
+@protected.get(
+    "/v1/sources/coingecko/simple-price",
+    tags=["Sources"],
+    operation_id="getCoinGeckoSimplePrice",
+    summary="Get CoinGecko simple price data",
+)
 def coingecko_simple_price(
     asset_id: str = Query("bitcoin", description="CoinGecko asset ID, for example bitcoin."),
     vs_currency: str = Query("usd", description="Quote currency such as usd."),
@@ -338,6 +365,7 @@ def coingecko_simple_price(
 @protected.get(
     "/v1/sources/deribit/options-context",
     tags=["Sources"],
+    operation_id="getDeribitOptionsContext",
     summary="Get Deribit BTC options and IV context",
     description="Returns Deribit BTC options, futures, historical volatility, and volatility-index context. Use it as the options and implied-volatility layer for final 8-12h BTC judgment.",
 )
@@ -358,23 +386,43 @@ def coinglass_market_structure(
     return service.get_coinglass_market_structure(symbol=symbol, exchange=exchange, interval=interval)
 
 
-@protected.get("/v1/sources/fear-greed/latest", tags=["Sources"], summary="Get latest Fear & Greed index")
+@protected.get(
+    "/v1/sources/fear-greed/latest",
+    tags=["Sources"],
+    operation_id="getFearGreedLatest",
+    summary="Get latest Fear & Greed index",
+)
 def fear_greed_latest(service: GatewayService = Depends(get_gateway_service)) -> dict:
     return service.get_fear_greed_latest()
 
 
-@protected.get("/v1/sources/mempool/fees", tags=["Sources"], summary="Get mempool.space recommended BTC fees")
+@protected.get(
+    "/v1/sources/mempool/fees",
+    tags=["Sources"],
+    operation_id="getMempoolFees",
+    summary="Get mempool.space recommended BTC fees",
+)
 def mempool_fees(service: GatewayService = Depends(get_gateway_service)) -> dict:
     return service.get_mempool_recommended_fees()
 
 
-@protected.get("/v1/sources/treasury/latest-avg-rates", tags=["Sources"], summary="Get latest Treasury average interest rate snapshot")
+@protected.get(
+    "/v1/sources/treasury/latest-avg-rates",
+    tags=["Sources"],
+    operation_id="getTreasuryLatestAvgRates",
+    summary="Get latest Treasury average interest rate snapshot",
+)
 @protected.get("/v1/sources/treasury/latest-curve", tags=["Sources"], include_in_schema=False)
 def treasury_latest_avg_rates(service: GatewayService = Depends(get_gateway_service)) -> dict:
     return service.get_treasury_latest_avg_rates()
 
 
-@protected.get("/v1/sources/bls/series/{series_id}", tags=["Sources"], summary="Get latest BLS time series observations")
+@protected.get(
+    "/v1/sources/bls/series/{series_id}",
+    tags=["Sources"],
+    operation_id="getBlsSeries",
+    summary="Get latest BLS time series observations",
+)
 def bls_series(
     series_id: str,
     limit: int = Query(12, ge=1, le=24, description="Maximum number of observations to return."),
@@ -383,7 +431,12 @@ def bls_series(
     return service.get_bls_series(series_id.upper(), limit=limit)
 
 
-@protected.get("/v1/sources/fred/series/{series_id}", tags=["Sources"], summary="Get latest FRED observations")
+@protected.get(
+    "/v1/sources/fred/series/{series_id}",
+    tags=["Sources"],
+    operation_id="getFredSeries",
+    summary="Get latest FRED observations",
+)
 def fred_series(
     series_id: str,
     limit: int = Query(12, ge=1, le=24, description="Maximum number of observations to return."),
@@ -392,12 +445,22 @@ def fred_series(
     return service.get_fred_series(series_id.upper(), limit=limit)
 
 
-@protected.get("/v1/sources/bea/datasets", tags=["Sources"], summary="List BEA datasets")
+@protected.get(
+    "/v1/sources/bea/datasets",
+    tags=["Sources"],
+    operation_id="getBeaDatasets",
+    summary="List BEA datasets",
+)
 def bea_datasets(service: GatewayService = Depends(get_gateway_service)) -> dict:
     return service.get_bea_datasets()
 
 
-@protected.get("/v1/sources/bea/gdp", tags=["Sources"], summary="Get BEA GDP observations")
+@protected.get(
+    "/v1/sources/bea/gdp",
+    tags=["Sources"],
+    operation_id="getBeaGdp",
+    summary="Get BEA GDP observations",
+)
 def bea_gdp(
     year: str = Query("LAST5", description="BEA year selector such as LAST5, 2024, or ALL."),
     service: GatewayService = Depends(get_gateway_service),
@@ -405,7 +468,12 @@ def bea_gdp(
     return service.get_bea_gdp(year=year)
 
 
-@protected.get("/v1/sources/fed/monetary-feed", tags=["Sources"], summary="Get latest Federal Reserve monetary RSS items")
+@protected.get(
+    "/v1/sources/fed/monetary-feed",
+    tags=["Sources"],
+    operation_id="getFedMonetaryFeed",
+    summary="Get latest Federal Reserve monetary RSS items",
+)
 def fed_monetary_feed(
     limit: int = Query(5, ge=1, le=10, description="Number of RSS items to return."),
     service: GatewayService = Depends(get_gateway_service),
@@ -413,7 +481,12 @@ def fed_monetary_feed(
     return service.get_fed_monetary_feed(limit=limit)
 
 
-@protected.get("/v1/sources/sec/company-tickers", tags=["Sources"], summary="Search SEC company ticker directory")
+@protected.get(
+    "/v1/sources/sec/company-tickers",
+    tags=["Sources"],
+    operation_id="searchSecCompanyTickers",
+    summary="Search SEC company ticker directory",
+)
 def sec_company_tickers(
     query: str | None = Query(None, description="Ticker or name fragment such as IBIT or BlackRock."),
     exchange: str | None = Query(None, description="Optional exchange filter such as Nasdaq or NYSE."),
@@ -423,7 +496,12 @@ def sec_company_tickers(
     return service.get_sec_company_tickers(query=query, exchange=exchange, limit=limit)
 
 
-@protected.get("/v1/sources/sec/submissions/{entity}", tags=["Sources"], summary="Get SEC submissions by ticker or CIK")
+@protected.get(
+    "/v1/sources/sec/submissions/{entity}",
+    tags=["Sources"],
+    operation_id="getSecSubmissions",
+    summary="Get SEC submissions by ticker or CIK",
+)
 def sec_submissions(
     entity: str,
     forms_limit: int = Query(10, ge=1, le=20, description="Maximum number of recent filings to return."),
@@ -432,7 +510,12 @@ def sec_submissions(
     return service.get_sec_submissions(entity=entity, forms_limit=forms_limit)
 
 
-@protected.get("/v1/sources/cftc/bitcoin-cot", tags=["Sources"], summary="Get latest CFTC bitcoin commitment of traders data")
+@protected.get(
+    "/v1/sources/cftc/bitcoin-cot",
+    tags=["Sources"],
+    operation_id="getCftcBitcoinCot",
+    summary="Get latest CFTC bitcoin commitment of traders data",
+)
 def cftc_bitcoin_cot(
     exchange: str = Query("cme", description="Exchange filter. Use cme or all."),
     limit: int = Query(4, ge=1, le=10, description="Maximum number of records to return."),
